@@ -47,6 +47,12 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
         default=False
     ) # type: ignore
     
+    preserve_parenting_relationships: BoolProperty(
+        name="Preserve Parenting",
+        description="Enabling this option make the importer preserve parent-child relationships across all objects, even object to bone relations. Turn this off if you wish to export the imported object to the .FBX format later. Keep it on if you pretend to use the imported object for anything else, such as reimporting it to RF again.",
+        default=True
+    ) # type: ignore
+    
     EXTRACTION_FOLDER = "cbb_extract"
     WEIGHT_TOLERANCE = 1e-05
     @staticmethod
@@ -308,7 +314,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                     parent_name = SkeletonData.INVALID_NAME
                                 
                                 force_parent_as_weights = False
-                                if target_armature is not None and vertex_amount != 0 and parent_name in bone_names_list:
+                                if target_armature is not None and vertex_amount != 0 and parent_name in bone_names_list and self.preserve_parenting_relationships == False:
                                     force_parent_as_weights = True
                                 
                                 msg_handler.debug_print(f"  Vertex amount: {vertex_amount}")
@@ -544,8 +550,6 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                     main_group = obj.vertex_groups.new(name=parent_name)
                                     for vertex_index in range(len(vertices)):
                                         main_group.add([vertex_index], 1.0, "ADD")
-                                
-                                if force_parent_as_weights == True:
                                     parent_name = SkeletonData.INVALID_NAME
                                 
                                 object_parent_names.append(parent_name)
@@ -1099,7 +1103,8 @@ class CBB_OT_ExportMSH(Operator, ExportHelper):
                                     for vertex_position, unknown, vertex_normal in object_vertice_data[object_index]:
                                         writer.write_converted_vector3f(vertex_position)
                                         writer.write_float(unknown)
-                                        writer.write_converted_vector3f(Vector(vertex_normal))
+                                        #writer.write_converted_vector3f(Vector(vertex_normal))
+                                        writer.write_vector3f(Vector(vertex_normal))
                                     for tri, face_normals_to_export, face_uvs_to_export, unknown in object_face_data[object_index]:
                                         writer.write_values("3I", tri)
                                         for face_normal in face_normals_to_export:
