@@ -23,6 +23,8 @@ In-depth details about features:
  
  -In the case the mesh-armature connection fails for any reason, the intended parent name will be written as custom property in each created object from the .msh file.
 
+ -The option "Preserve Parenting" should be turned off if you pretend to export the imported .msh objects to the FBX format. The FBX format does not work very well when objects are parented to bones, so when this option is turned off, parenting of mesh vertices to bone is done through weight assignment instead. Should the option be left on, object-bone parenting will be preserved as-is, as this is the ideal thing to happen if you wish to export the objects as a .msh file again or in other formats that do not have fbx's issues.
+
  __.ANI importer__ :
  
  -If "Apply to Selected Objects" is on, the animation will attempt to latch onto any objects within the selection, including normal objects and armatures. The reason for that is that R3 Engine .ANI animations support animation for objects without the necessity of an armature. Although even with this option on, there should be only a single armature in the selection.
