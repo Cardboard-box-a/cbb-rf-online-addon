@@ -20,8 +20,6 @@ import bmesh
 from .rf_shared import RFShared
 from . import texture_utils
 
-PIXEL_FORMAT_FLAGS_OFFSET = 80
-
 class CBB_OT_ImportMSH(Operator, ImportHelper):
     bl_idname = "cbb.msh_import"
     bl_label = "Import MSH"
@@ -79,86 +77,50 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                         return os.path.join(root, file)
         return None
     
-    @staticmethod
-    def _parse_dds_header_from_bytes(header_bytes: bytes) -> bool:
-        """
-        Parse DDS header from raw bytes and return whether it has alpha pixels.
-        
-        Args:
-            header_bytes: Raw bytes of the DDS header (at least 84 bytes)
-            
-        Returns:
-            bool: True if DDPF_ALPHAPIXELS flag is set, False otherwise, None on error
-        """
-        try:
-            # Verify magic number
-            if len(header_bytes) < 84:
-                print(f"DDS header too short: {len(header_bytes)} bytes")
-                return None
-                
-            magic = header_bytes[:4]
-            if magic != b'DDS ':
-                print(f"Invalid DDS magic number: {magic}")
-                return None
-            
-            # Read the DDSPixelFormatFlags (u32 at offset 80)
-            pixel_format_flags = struct.unpack('<I', header_bytes[PIXEL_FORMAT_FLAGS_OFFSET:PIXEL_FORMAT_FLAGS_OFFSET + 4])[0]
-            
-            # Check if DDPF_ALPHAPIXELS (bit 0, 0x1) is set
-            has_alpha = bool(pixel_format_flags & 0x1)
-            
-            return has_alpha
-            
-        except Exception as e:
-            print(f"Error parsing DDS header bytes: {e}")
-            traceback.print_exc()
-            return None
-    
-    @staticmethod
-    def parse_dds_header_from_file(file_path: str) -> bool:
-        """
-        Parse DDS header from a file path and return whether it has alpha pixels.
-        
-        Args:
-            file_path: Path to the .dds file
-            
-        Returns:
-            bool: True if DDPF_ALPHAPIXELS flag is set, False otherwise, None on error
-        """
-        try:
-            with open(file_path, 'rb') as f:
-                header_data = f.read(128)  # DDS header is 128 bytes
-                return CBB_OT_ImportMSH._parse_dds_header_from_bytes(header_data)
-        except Exception as e:
-            print(f"Error reading DDS header from {file_path}: {e}")
-            traceback.print_exc()
-            return None
-    
     def get_texture_as_image(self, mesh_file_path, texture_name: str, target_dir, max_levels) -> tuple:
         """
-        Get texture as Blender image and analyze alpha channel.
+        Get texture as Blender image and optionally analyze alpha.
         
         Returns:
-            tuple: (bpy.types.Image, dict) where dict contains alpha analysis,
-                or (None, None) if texture already exists in Blender
+            tuple: (bpy.types.Image, dict or None) 
+                - If texture already exists: (image, None) - reuse existing material
+                - If newly loaded: (image, alpha_analysis) - create new material
+                - If not found: (None, None)
         """
         
         print(f"Attempting to get texture at path: {mesh_file_path}{texture_name}")
         
+        # Check if material already exists - if so, we don't need to do anything
+        material_name = f"Mat_{texture_name}"
+        if material_name in bpy.data.materials:
+            print(f"    Material '{material_name}' already exists, skipping texture load and analysis.")
+            # Return None for both - signal to reuse existing material
+            return None, None
+        
         # Check if the image is already loaded in Blender
-        for image in bpy.data.images:
-            if texture_name.casefold() == image.name.casefold():
-                print(f"    Attempt aborted: texture is already loaded.")
-                # Still need to analyze alpha for material reuse
-                # Try to find the original file to analyze
-                existing_image = image
-                if existing_image.filepath:
-                    try:
-                        analysis = texture_utils.analyze_dds_alpha(bpy.path.abspath(existing_image.filepath))
-                        return None, analysis
-                    except:
-                        pass
-                return None, None
+        if texture_name in bpy.data.images:
+            print(f"    Texture already loaded, but no material exists yet.")
+            existing_image = bpy.data.images[texture_name]
+            
+            # Need to analyze - try to find the original file
+            # This is a fallback case that shouldn't happen often
+            if existing_image.filepath:
+                try:
+                    abs_path = bpy.path.abspath(existing_image.filepath)
+                    if abs_path.lower().endswith('.dds'):
+                        alpha_analysis = texture_utils.analyze_dds_alpha(abs_path)
+                        return existing_image, alpha_analysis
+                except:
+                    pass
+            
+            # Can't analyze, use conservative default
+            return existing_image, {
+                'has_alpha': True,
+                'mode': 'BLEND',
+                'threshold': 0.5,
+                'histogram': {},
+                'binary_percentage': 0.0
+            }
 
         # Normalize mesh file path
         mesh_file_path = os.path.normpath(mesh_file_path)
@@ -189,19 +151,19 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                     if found_file_ext.casefold() == ".dds":
                         full_texture_path = os.path.join(root, found_file)
                         
-                        # Analyze alpha channel
+                        # Analyze BEFORE loading into Blender
                         try:
-                            analysis = texture_utils.analyze_dds_alpha(full_texture_path)
-                            print(f"    Alpha analysis: mode={analysis['mode']}, binary%={analysis['binary_percentage']:.1f}%")
+                            alpha_analysis = texture_utils.analyze_dds_alpha(full_texture_path)
                         except Exception as e:
                             print(f"    Warning: Alpha analysis failed: {e}")
-                            analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                            alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
                         
+                        # Now load the texture
                         try:
                             print(f"    Attempt succeeded: texture loaded from loose file in disk.")
                             blender_image = bpy.data.images.load(full_texture_path, check_existing=True)
                             blender_image.pack()
-                            return blender_image, analysis
+                            return blender_image, alpha_analysis
                         except RuntimeError as e:
                             self.report({"WARNING"}, f"Found texture file '{full_texture_path}' but failed to load: {e}")
                         except Exception as e:
@@ -235,30 +197,34 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                             # Read texture data
                             texture_data = opened_file.read(file_size - 128)
 
-                            # Create temporary file with the texture
+                            # Create temporary file for analysis
                             temp_file = tempfile.NamedTemporaryFile(suffix=".dds", delete=False)
                             temp_file.write(dds_header)
                             temp_file.write(texture_data)
                             temp_file.flush()
                             temp_file.close()
                             
-                            # Analyze alpha from the temporary file
+                            # Analyze the temp file
                             try:
-                                analysis = texture_utils.analyze_dds_alpha(temp_file.name)
-                                print(f"    Alpha analysis: mode={analysis['mode']}, binary%={analysis['binary_percentage']:.1f}%")
+                                alpha_analysis = texture_utils.analyze_dds_alpha(temp_file.name)
                             except Exception as e:
                                 print(f"    Warning: Alpha analysis failed: {e}")
-                                analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                                alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
                             
+                            # Load into Blender
                             blender_image = bpy.data.images.load(temp_file.name)
                             blender_image.name = texture_name
                             blender_image.pack()
                             
-                            os.remove(temp_file.name)
+                            # Clean up temp file
+                            try:
+                                os.remove(temp_file.name)
+                            except:
+                                pass
                             
                             print(f"    Attempt succeeded: texture loaded from inside RFS files.")
                             
-                            return blender_image, analysis
+                            return blender_image, alpha_analysis
 
             except (OSError, IOError) as e:
                 self.report({"ERROR"}, f"Error while opening file at [{file_path}]: {e}")
@@ -266,7 +232,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                 return None, None
 
         return None, None
-
+    
     @staticmethod
     def apply_texture_to_mesh(mesh_obj, texture_image, texture_name: str, alpha_analysis: dict):
         """
@@ -274,36 +240,35 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
         
         Args:
             mesh_obj: The mesh object to apply the material to
-            texture_image: The texture image (can be None if reusing existing material)
+            texture_image: The texture image (can be None if material already exists)
             texture_name: Name of the texture for material lookup
-            alpha_analysis: Dict with alpha analysis results from texture_utils.analyze_dds_alpha()
+            alpha_analysis: Dict with alpha analysis results (can be None if material exists)
         """
         material_name = f"Mat_{texture_name}"
         
-        # Case B: Check if material already exists (texture was already loaded)
-        if texture_image is None and material_name in bpy.data.materials:
+        # Case: Material already exists - just assign it
+        if material_name in bpy.data.materials:
             mat = bpy.data.materials[material_name]
             if mesh_obj.data.materials:
                 mesh_obj.data.materials[0] = mat
             else:
                 mesh_obj.data.materials.append(mat)
+            print(f"  Reusing existing material '{material_name}'")
             return
         
-        # Case C: Texture exists but no material (fallback - shouldn't happen often)
-        if texture_image is None and texture_name in bpy.data.images:
-            texture_image = bpy.data.images[texture_name]
-            if alpha_analysis is None:
-                alpha_analysis = {'mode': 'OPAQUE', 'threshold': 0.5, 'has_alpha': False}
-        
-        # If we still don't have a texture image, we can't create a material
+        # Case: No image provided, try to find it
         if texture_image is None:
-            return
+            if texture_name in bpy.data.images:
+                texture_image = bpy.data.images[texture_name]
+            else:
+                print(f"  Cannot create material: texture image not found")
+                return
         
         # Default analysis if none provided
         if alpha_analysis is None:
             alpha_analysis = {'mode': 'OPAQUE', 'threshold': 0.5, 'has_alpha': False}
         
-        # Case A: Create new material for first-time loaded texture
+        # Create new material
         mat = bpy.data.materials.new(name=material_name)
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes["Principled BSDF"]
@@ -333,7 +298,6 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
             nodes = mat.node_tree.nodes
             links = mat.node_tree.links
             
-            # Create math nodes: 1 - (alpha < threshold)
             less_than = nodes.new('ShaderNodeMath')
             less_than.operation = 'LESS_THAN'
             less_than.inputs[1].default_value = threshold
@@ -344,7 +308,6 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
             subtract.inputs[0].default_value = 1.0
             subtract.location = (less_than.location.x + 200, less_than.location.y)
             
-            # Connect: Alpha → Less Than → Subtract → BSDF Alpha
             alpha_socket = bsdf.inputs.get('Alpha')
             if alpha_socket:
                 links.new(tex_image.outputs["Alpha"], less_than.inputs[0])
@@ -358,7 +321,6 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
             mat.node_tree.links.new(bsdf.inputs["Alpha"], tex_image.outputs["Alpha"])
             print(f"  Material '{material_name}' set to BLEND mode")
         
-        # Always disable transparency overlap (causes sorting issues)
         mat.use_transparency_overlap = False
         
         if mesh_obj.data.materials:
@@ -716,10 +678,17 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                 
                                 if texture_path:
                                     texture_path = ntpath.basename(texture_path)
-                                    texture = self.get_texture_as_image(self.directory, texture_path, CBB_OT_ImportMSH.EXTRACTION_FOLDER, 5) 
-                                    if texture is not None:
-                                        texture_image, alpha_analysis = texture
-                                        CBB_OT_ImportMSH.apply_texture_to_mesh(obj, texture_image, texture_path, alpha_analysis)
+                                    texture_image, alpha_analysis = self.get_texture_as_image(
+                                        self.directory, 
+                                        texture_path, 
+                                        CBB_OT_ImportMSH.EXTRACTION_FOLDER, 
+                                        5
+                                    )
+                                    
+                                    # apply_texture_to_mesh handles all cases: new material, existing material, or None
+                                    CBB_OT_ImportMSH.apply_texture_to_mesh(obj, texture_image, texture_path, alpha_analysis)
+                                    
+                                    if texture_image is not None or f"Mat_{texture_path}" in bpy.data.materials:
                                         msg_handler.debug_print(f"  Texture data assigned")
                                     else:
                                         msg_handler.report("INFO", f"Could not find texture: {texture_path}")

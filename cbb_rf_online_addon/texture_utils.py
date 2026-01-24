@@ -17,6 +17,55 @@ except ImportError:
     HAS_TEXTURE2DDECODER = False
     print("Warning: texture2ddecoder not available, using slower manual DXT decoding")
 
+def decode_dxt1_alpha_manual(dds_data: bytes, width: int, height: int) -> np.ndarray:
+    """
+    Manual DXT1 alpha decoding with proper 1-bit alpha support.
+    DXT1 has alpha when color0 <= color1 in a block.
+    """
+    block_width = (width + 3) // 4
+    block_height = (height + 3) // 4
+    alpha_channel = np.zeros((height, width), dtype=np.uint8)
+    
+    offset = 128  # Skip DDS header
+    
+    for block_y in range(block_height):
+        for block_x in range(block_width):
+            if offset + 8 > len(dds_data):
+                break
+            
+            # Read DXT1 block (8 bytes total)
+            color0 = struct.unpack('<H', dds_data[offset:offset+2])[0]
+            color1 = struct.unpack('<H', dds_data[offset+2:offset+4])[0]
+            indices = struct.unpack('<I', dds_data[offset+4:offset+8])[0]
+            
+            offset += 8
+            
+            # Check if this block has alpha mode
+            has_alpha_block = (color0 <= color1)
+            
+            # Decode 16 pixels (4x4 block)
+            for py in range(4):
+                for px in range(4):
+                    pixel_x = block_x * 4 + px
+                    pixel_y = block_y * 4 + py
+                    
+                    if pixel_x >= width or pixel_y >= height:
+                        continue
+                    
+                    # Get 2-bit index for this pixel
+                    pixel_index = py * 4 + px
+                    color_index = (indices >> (pixel_index * 2)) & 0x3
+                    
+                    # Determine alpha based on mode and index
+                    if has_alpha_block and color_index == 3:
+                        # Index 3 in alpha mode = transparent
+                        alpha_channel[pixel_y, pixel_x] = 0
+                    else:
+                        # All other cases = opaque
+                        alpha_channel[pixel_y, pixel_x] = 255
+    
+    return alpha_channel
+
 def decode_dxt3_alpha_manual(dds_data: bytes, width: int, height: int) -> np.ndarray:
     """
     Manual DXT3 alpha decoding (fallback when texture2ddecoder is unavailable).
@@ -98,7 +147,7 @@ def decode_dxt5_alpha_manual(dds_data: bytes, width: int, height: int) -> np.nda
 def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
     """
     Analyze DDS alpha channel and recommend transparency mode.
-    Uses texture2ddecoder for DXT5 only, manual decoding for DXT3.
+    Uses manual decoding for DXT1 and DXT3, texture2ddecoder for DXT5 if available.
     """
     try:
         with open(dds_path, 'rb') as f:
@@ -117,70 +166,37 @@ def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
         
         print(f"  DDS Analysis: {width}x{height}, FourCC: {fourcc}, AlphaFlag: {has_alpha_flag}")
         
-        # Handle DXT1 without alpha
-        if fourcc == b'DXT1' and not has_alpha_flag:
-            return {
-                'has_alpha': False,
-                'mode': 'OPAQUE',
-                'threshold': None,
-                'histogram': {},
-                'binary_percentage': 100.0
-            }
-        
-        # Decode alpha channel
-        if fourcc == b'DXT3':
-            # DXT3 / BC2 - NOT SUPPORTED by texture2ddecoder, we use manual decoding
-            print(f"  Using manual Python decoding for DXT3 (texture2ddecoder doesn't support BC2)")
+        # Decode alpha channel based on format
+        if fourcc == b'DXT1':
+            # Always decode DXT1 manually to properly detect 1-bit alpha
+            print(f"  Using manual DXT1 decoding")
+            alpha = decode_dxt1_alpha_manual(dds_data, width, height)
+            
+        elif fourcc == b'DXT3':
+            # DXT3 / BC2 - Manual decoding (texture2ddecoder doesn't support it)
+            print(f"  Using manual DXT3 decoding")
             alpha = decode_dxt3_alpha_manual(dds_data, width, height)
             
         elif fourcc == b'DXT5':
-            # DXT5 / BC3 - Use fast decoder if available
+            # DXT5 / BC3 - Use fast decoder if available, fallback to manual
             if HAS_TEXTURE2DDECODER:
                 try:
                     rgba = texture2ddecoder.decode_bc3(dds_data[128:], width, height)
                     alpha = np.frombuffer(rgba, dtype=np.uint8)[3::4].reshape(height, width)
-                    print(f"  Used texture2ddecoder (fast C++ path) for DXT5")
+                    print(f"  Used texture2ddecoder for DXT5")
                 except Exception as e:
-                    print(f"  texture2ddecoder failed, falling back to manual: {e}")
+                    print(f"  texture2ddecoder failed for DXT5: {e}")
                     alpha = decode_dxt5_alpha_manual(dds_data, width, height)
             else:
-                print(f"  Using manual Python decoding for DXT5")
+                print(f"  Using manual DXT5 decoding")
                 alpha = decode_dxt5_alpha_manual(dds_data, width, height)
-                
-        elif fourcc == b'DXT1':
-            # DXT1 with alpha - Use fast decoder if available
-            if HAS_TEXTURE2DDECODER:
-                try:
-                    rgba = texture2ddecoder.decode_bc1(dds_data[128:], width, height)
-                    alpha = np.frombuffer(rgba, dtype=np.uint8)[3::4].reshape(height, width)
-                    print(f"  Used texture2ddecoder (fast C++ path) for DXT1")
-                except Exception as e:
-                    print(f"  texture2ddecoder failed: {e}")
-                    # DXT1 alpha is too complex to decode manually, assume needs masking
-                    return {
-                        'has_alpha': True,
-                        'mode': 'MASK',
-                        'threshold': 0.5,
-                        'histogram': {},
-                        'binary_percentage': 50.0
-                    }
-            else:
-                # Conservative fallback
-                return {
-                    'has_alpha': True,
-                    'mode': 'MASK',
-                    'threshold': 0.5,
-                    'histogram': {},
-                    'binary_percentage': 50.0
-                }
         else:
             raise ValueError(f"Unsupported format: {fourcc}")
         
-        # Build histogram efficiently with numpy
+        # Analyze the decoded alpha channel
         unique, counts = np.unique(alpha, return_counts=True)
         histogram = dict(zip(unique.tolist(), counts.tolist()))
         
-        # Calculate binary percentage
         binary_pixels = histogram.get(0, 0) + histogram.get(255, 0)
         total_pixels = width * height
         binary_percentage = (binary_pixels / total_pixels) * 100
@@ -188,7 +204,17 @@ def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
         print(f"  Alpha values found: {sorted(histogram.keys())[:20]}...")
         print(f"  Binary percentage: {binary_percentage:.1f}%")
         
-        # Determine mode
+        # Check if ALL pixels are fully opaque
+        if histogram.get(255, 0) == total_pixels:
+            return {
+                'has_alpha': False,
+                'mode': 'OPAQUE',
+                'threshold': None,
+                'histogram': histogram,
+                'binary_percentage': 100.0
+            }
+        
+        # Determine mode based on binary percentage
         if binary_percentage > 98:
             mode = 'MASK'
             non_binary = [v for v in histogram.keys() if 0 < v < 255]
@@ -212,6 +238,7 @@ def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
         print(f"Error analyzing DDS alpha: {e}")
         import traceback
         traceback.print_exc()
+        # Conservative fallback
         return {
             'has_alpha': True,
             'mode': 'BLEND',
