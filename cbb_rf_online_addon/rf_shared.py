@@ -806,35 +806,37 @@ class RFShared(Operator):
             )
             r3m_alpha_node.outputs[0].default_value = texture_layer.argb_color[0]
 
-            tinted_texture_color_node = nodes.new(type='ShaderNodeMixRGB')
+            tinted_texture_color_node = nodes.new(type='ShaderNodeMix')
+            tinted_texture_color_node.data_type = 'RGBA'
             tinted_texture_color_node.name = f"Tinted_Tex_Color_Layer_{i}"
             tinted_texture_color_node.label = f"Tinted Texture [{image.name}]"
             tinted_texture_color_node.blend_type = 'MULTIPLY'
-            tinted_texture_color_node.inputs['Fac'].default_value = 1.0
-            links.new(tex_image_node.outputs['Color'], tinted_texture_color_node.inputs['Color1'])
-            links.new(r3m_rgb_tint_node.outputs['Color'], tinted_texture_color_node.inputs['Color2'])
+            tinted_texture_color_node.inputs['Factor'].default_value = 1.0
+            links.new(tex_image_node.outputs['Color'], tinted_texture_color_node.inputs['A'])
+            links.new(r3m_rgb_tint_node.outputs['Color'], tinted_texture_color_node.inputs['B'])
             
             # At this point, tinted_texture_color_node represents the texture color already tinted by ARGB
-            current_layer_tinted_color_socket = tinted_texture_color_node.outputs['Color']
+            current_layer_tinted_color_socket = tinted_texture_color_node.outputs['Result']
             
             # Will skip other effects if present.
             if texture_layer.flags & int(LayerFlag._MAT_ENV_BUMP.value): 
                 sampled_dudv_color_socket = tex_image_node.outputs['Color']
-                separate_rgb_dudv_node = nodes.new(type='ShaderNodeSeparateRGB')
+                separate_rgb_dudv_node = nodes.new(type='ShaderNodeSeparateColor')
+                separate_rgb_dudv_node.mode = 'RGB'
                 separate_rgb_dudv_node.name = f"Separate_DuDv_{tex_image_node.name}"
-                links.new(sampled_dudv_color_socket, separate_rgb_dudv_node.inputs['Image'])
+                links.new(sampled_dudv_color_socket, separate_rgb_dudv_node.inputs['Color'])
 
                 math_subtract_r_node = nodes.new(type='ShaderNodeMath')
                 math_subtract_r_node.name = f"Sub_R_DuDv_{tex_image_node.name}"
                 math_subtract_r_node.operation = 'SUBTRACT'
-                links.new(separate_rgb_dudv_node.outputs['R'], math_subtract_r_node.inputs[0])
+                links.new(separate_rgb_dudv_node.outputs['Red'], math_subtract_r_node.inputs[0])
                 math_subtract_r_node.inputs[1].default_value = 0.5
                 du_unscaled_socket = math_subtract_r_node.outputs['Value']
 
                 math_subtract_g_node = nodes.new(type='ShaderNodeMath')
                 math_subtract_g_node.name = f"Sub_G_DuDv_{tex_image_node.name}"
                 math_subtract_g_node.operation = 'SUBTRACT'
-                links.new(separate_rgb_dudv_node.outputs['G'], math_subtract_g_node.inputs[0])
+                links.new(separate_rgb_dudv_node.outputs['Green'], math_subtract_g_node.inputs[0])
                 math_subtract_g_node.inputs[1].default_value = 0.5
                 dv_unscaled_socket = math_subtract_g_node.outputs['Value']
 
@@ -1354,7 +1356,8 @@ class RFShared(Operator):
             current_blend_op_type == BlendMethod.DEFAULT.value or \
             current_blend_op_type == BlendMethod.SHADOW.value or \
             current_blend_op_type == BlendMethod.ONLY_TRANSPARENCY.value:
-                mix_node = nodes.new(type='ShaderNodeMixRGB')
+                mix_node = nodes.new(type='ShaderNodeMix')
+                mix_node.data_type = 'RGBA'
                 mix_node.name = f"Blend_BaseColor_Layer_{i}"
                 
                 if current_blend_op_type == BlendMethod.NONE.value:
@@ -1362,27 +1365,28 @@ class RFShared(Operator):
                         accumulated_base_color_socket = current_layer_tinted_color_socket
                     else:
                         mix_node.blend_type = 'MIX'
-                        links.new(accumulated_base_color_socket, mix_node.inputs['Color1'])
-                        links.new(current_layer_tinted_color_socket, mix_node.inputs['Color2'])
-                        links.new(alpha_for_blend_factor, mix_node.inputs['Fac'])
-                        accumulated_base_color_socket = mix_node.outputs['Color']
+                        links.new(accumulated_base_color_socket, mix_node.inputs['A'])
+                        links.new(current_layer_tinted_color_socket, mix_node.inputs['B'])
+                        links.new(alpha_for_blend_factor, mix_node.inputs['Factor'])
+                        accumulated_base_color_socket = mix_node.outputs['Result']
                 
                 elif current_blend_op_type == BlendMethod.OPAQUE.value or \
                     current_blend_op_type == BlendMethod.ONLY_TRANSPARENCY.value:
                     mix_node.blend_type = 'MIX'
-                    links.new(accumulated_base_color_socket, mix_node.inputs['Color1'])
-                    links.new(current_layer_tinted_color_socket, mix_node.inputs['Color2'])
-                    links.new(alpha_for_blend_factor, mix_node.inputs['Fac'])
-                    accumulated_base_color_socket = mix_node.outputs['Color']
+                    links.new(accumulated_base_color_socket, mix_node.inputs['A'])
+                    links.new(current_layer_tinted_color_socket, mix_node.inputs['B'])
+                    links.new(alpha_for_blend_factor, mix_node.inputs['Factor'])
+                    accumulated_base_color_socket = mix_node.outputs['Result']
 
                 elif current_blend_op_type == BlendMethod.DEFAULT.value or \
                     current_blend_op_type == BlendMethod.SHADOW.value:
-                    term1_mix = nodes.new('ShaderNodeMixRGB')
+                    term1_mix = nodes.new('ShaderNodeMix')
+                    term1_mix.data_type = 'RGBA'
                     term1_mix.name = f"Term1_Default_Layer_{i}"
                     term1_mix.blend_type = 'MIX'
-                    term1_mix.inputs['Color1'].default_value = (0,0,0,1)
-                    links.new(current_layer_tinted_color_socket, term1_mix.inputs['Color2'])
-                    links.new(alpha_for_blend_factor, term1_mix.inputs['Fac'])
+                    term1_mix.inputs['A'].default_value = (0,0,0,1)
+                    links.new(current_layer_tinted_color_socket, term1_mix.inputs['B'])
+                    links.new(alpha_for_blend_factor, term1_mix.inputs['Factor'])
 
                     inv_src_color_node = nodes.new('ShaderNodeVectorMath')
                     inv_src_color_node.name = f"InvSrc_Default_Layer_{i}"
@@ -1390,31 +1394,33 @@ class RFShared(Operator):
                     inv_src_color_node.inputs[0].default_value = (1,1,1)
                     links.new(current_layer_tinted_color_socket, inv_src_color_node.inputs[1])
 
-                    term2_multiply = nodes.new('ShaderNodeMixRGB')
+                    term2_multiply = nodes.new('ShaderNodeMix')
+                    term2_multiply.data_type = 'RGBA'
                     term2_multiply.name = f"Term2_Default_Layer_{i}"
                     term2_multiply.blend_type = 'MULTIPLY'
-                    term2_multiply.inputs['Fac'].default_value = 1.0
-                    links.new(accumulated_base_color_socket, term2_multiply.inputs['Color1'])
-                    links.new(inv_src_color_node.outputs['Vector'], term2_multiply.inputs['Color2'])
+                    term2_multiply.inputs['Factor'].default_value = 1.0
+                    links.new(accumulated_base_color_socket, term2_multiply.inputs['A'])
+                    links.new(inv_src_color_node.outputs['Vector'], term2_multiply.inputs['B'])
                     
                     mix_node.blend_type = 'ADD'
-                    mix_node.inputs['Fac'].default_value = 1.0
-                    links.new(term1_mix.outputs['Color'], mix_node.inputs['Color1'])
-                    links.new(term2_multiply.outputs['Color'], mix_node.inputs['Color2'])
-                    accumulated_base_color_socket = mix_node.outputs['Color']
+                    mix_node.inputs['Factor'].default_value = 1.0
+                    links.new(term1_mix.outputs['Result'], mix_node.inputs['A'])
+                    links.new(term2_multiply.outputs['Result'], mix_node.inputs['B'])
+                    accumulated_base_color_socket = mix_node.outputs['Result']
             
             # BRIGHT, BACK_BRIGHT primarily affect EmissionColor stream
             elif current_blend_op_type == BlendMethod.BRIGHT.value:
-                add_node = nodes.new(type='ShaderNodeMixRGB')
+                add_node = nodes.new(type='ShaderNodeMix')
+                add_node.data_type = 'RGBA'
                 add_node.name = f"Blend_Emission_Layer_{i}"
                 add_node.blend_type = 'ADD'
-                # Color1 is previous accumulated emission
-                links.new(accumulated_emission_color_socket, add_node.inputs['Color1'])
-                # Color2 is current layer's tinted color
-                links.new(current_layer_tinted_color_socket, add_node.inputs['Color2'])
-                # Fac is current layer's R3M ARGB Alpha (intensity)
-                links.new(alpha_for_blend_factor, add_node.inputs['Fac'])
-                accumulated_emission_color_socket = add_node.outputs['Color']
+                # A is previous accumulated emission
+                links.new(accumulated_emission_color_socket, add_node.inputs['A'])
+                # B is current layer's tinted color
+                links.new(current_layer_tinted_color_socket, add_node.inputs['B'])
+                # Factor is current layer's R3M ARGB Alpha (intensity)
+                links.new(alpha_for_blend_factor, add_node.inputs['Factor'])
+                accumulated_emission_color_socket = add_node.outputs['Result']
 
             elif current_blend_op_type == BlendMethod.BACK_BRIGHT.value:
 
@@ -1425,37 +1431,41 @@ class RFShared(Operator):
                 inv_src_color_node.inputs[0].default_value = (1,1,1)
                 links.new(current_layer_tinted_color_socket, inv_src_color_node.inputs[1])
 
-                term2_multiply = nodes.new('ShaderNodeMixRGB')
+                term2_multiply = nodes.new('ShaderNodeMix')
+                term2_multiply.data_type = 'RGBA'
                 term2_multiply.blend_type = 'MULTIPLY'
-                term2_multiply.inputs['Fac'].default_value = 1.0
-                links.new(accumulated_emission_color_socket, term2_multiply.inputs['Color1'])
-                links.new(inv_src_color_node.outputs['Vector'], term2_multiply.inputs['Color2'])
+                term2_multiply.inputs['Factor'].default_value = 1.0
+                links.new(accumulated_emission_color_socket, term2_multiply.inputs['A'])
+                links.new(inv_src_color_node.outputs['Vector'], term2_multiply.inputs['B'])
                 
-                final_add_node = nodes.new('ShaderNodeMixRGB')
+                final_add_node = nodes.new('ShaderNodeMix')
+                final_add_node.data_type = 'RGBA'
                 final_add_node.name = f"Blend_Emission_Layer_{i}"
                 final_add_node.blend_type = 'ADD'
-                final_add_node.inputs['Fac'].default_value = 1.0
-                links.new(term1_is_current_color, final_add_node.inputs['Color1'])
-                links.new(term2_multiply.outputs['Color'], final_add_node.inputs['Color2'])
-                accumulated_emission_color_socket = final_add_node.outputs['Color']
+                final_add_node.inputs['Factor'].default_value = 1.0
+                links.new(term1_is_current_color, final_add_node.inputs['A'])
+                links.new(term2_multiply.outputs['Result'], final_add_node.inputs['B'])
+                accumulated_emission_color_socket = final_add_node.outputs['Result']
             
             
             # LIGHTMAP and INV_LIGHTMAP typically affect BaseColor
             elif current_blend_op_type == BlendMethod.LIGHTMAP.value:
-                multiply_node = nodes.new(type='ShaderNodeMixRGB')
+                multiply_node = nodes.new(type='ShaderNodeMix')
+                multiply_node.data_type = 'RGBA'
                 multiply_node.name = f"Blend_BaseColor_Layer_{i}_Mul1"
                 multiply_node.blend_type = 'MULTIPLY'
-                multiply_node.inputs['Fac'].default_value = 1.0
-                links.new(accumulated_base_color_socket, multiply_node.inputs['Color1'])
-                links.new(current_layer_tinted_color_socket, multiply_node.inputs['Color2'])
+                multiply_node.inputs['Factor'].default_value = 1.0
+                links.new(accumulated_base_color_socket, multiply_node.inputs['A'])
+                links.new(current_layer_tinted_color_socket, multiply_node.inputs['B'])
 
-                multiply_by_two_node = nodes.new(type="ShaderNodeMixRGB")
+                multiply_by_two_node = nodes.new(type="ShaderNodeMix")
+                multiply_by_two_node.data_type = 'RGBA'
                 multiply_by_two_node.name = f"Lightmap_x2_Layer_{i}"
                 multiply_by_two_node.blend_type = 'MULTIPLY'
-                multiply_by_two_node.inputs['Color1'].default_value = (2.0, 2.0, 2.0, 1.0)
-                links.new(multiply_node.outputs['Color'], multiply_by_two_node.inputs['Color2'])
-                multiply_by_two_node.inputs['Fac'].default_value = 1.0
-                accumulated_base_color_socket = multiply_by_two_node.outputs['Color']
+                multiply_by_two_node.inputs['A'].default_value = (2.0, 2.0, 2.0, 1.0)
+                links.new(multiply_node.outputs['Result'], multiply_by_two_node.inputs['B'])
+                multiply_by_two_node.inputs['Factor'].default_value = 1.0
+                accumulated_base_color_socket = multiply_by_two_node.outputs['Result']
 
             elif current_blend_op_type == BlendMethod.INV_LIGHTMAP.value:
                 # BaseColor = PrevBaseColor * (1 - TintedCurrentTexColor)
@@ -1464,13 +1474,14 @@ class RFShared(Operator):
                 inv_src_color_node.inputs[0].default_value = (1,1,1)
                 links.new(current_layer_tinted_color_socket, inv_src_color_node.inputs[1])
 
-                multiply_node = nodes.new(type='ShaderNodeMixRGB')
+                multiply_node = nodes.new(type='ShaderNodeMix')
+                multiply_node.data_type = 'RGBA'
                 multiply_node.name = f"Blend_BaseColor_Layer_{i}"
                 multiply_node.blend_type = 'MULTIPLY'
-                multiply_node.inputs['Fac'].default_value = 1.0
-                links.new(accumulated_base_color_socket, multiply_node.inputs['Color1'])
-                links.new(inv_src_color_node.outputs['Vector'], multiply_node.inputs['Color2'])
-                accumulated_base_color_socket = multiply_node.outputs['Color']
+                multiply_node.inputs['Factor'].default_value = 1.0
+                links.new(accumulated_base_color_socket, multiply_node.inputs['A'])
+                links.new(inv_src_color_node.outputs['Vector'], multiply_node.inputs['B'])
+                accumulated_base_color_socket = multiply_node.outputs['Result']
             
             elif current_blend_op_type == BlendMethod.INV_BRIGHT.value:
                 one_minus_alpha_node = nodes.new(type="ShaderNodeMath")
@@ -1479,20 +1490,22 @@ class RFShared(Operator):
                 links.new(alpha_for_blend_factor, one_minus_alpha_node.inputs[1])
 
                 # Contribution = TintedCurrentTexColor * (1 - R3M_ARGB_A)
-                scaled_color_node = nodes.new(type='ShaderNodeMixRGB')
+                scaled_color_node = nodes.new(type='ShaderNodeMix')
+                scaled_color_node.data_type = 'RGBA'
                 scaled_color_node.blend_type = 'MIX'
-                scaled_color_node.inputs['Color1'].default_value = (0,0,0,1)
-                links.new(current_layer_tinted_color_socket, scaled_color_node.inputs['Color2'])
-                links.new(one_minus_alpha_node.outputs['Value'], scaled_color_node.inputs['Fac'])
+                scaled_color_node.inputs['A'].default_value = (0,0,0,1)
+                links.new(current_layer_tinted_color_socket, scaled_color_node.inputs['B'])
+                links.new(one_minus_alpha_node.outputs['Value'], scaled_color_node.inputs['Factor'])
                 
                 # Add to accumulated emission
-                add_node = nodes.new(type='ShaderNodeMixRGB')
+                add_node = nodes.new(type='ShaderNodeMix')
+                add_node.data_type = 'RGBA'
                 add_node.name = f"Blend_Emission_Layer_{i}"
                 add_node.blend_type = 'ADD'
-                add_node.inputs['Fac'].default_value = 1.0
-                links.new(accumulated_emission_color_socket, add_node.inputs['Color1'])
-                links.new(scaled_color_node.outputs['Color'], add_node.inputs['Color2'])
-                accumulated_emission_color_socket = add_node.outputs['Color']
+                add_node.inputs['Factor'].default_value = 1.0
+                links.new(accumulated_emission_color_socket, add_node.inputs['A'])
+                links.new(scaled_color_node.outputs['Result'], add_node.inputs['B'])
+                accumulated_emission_color_socket = add_node.outputs['Result']
 
             # --- End of Layer Blending ---
 

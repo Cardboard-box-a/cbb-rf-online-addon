@@ -1,7 +1,7 @@
 import bpy
 import struct
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.types import Context, Event, Operator, ActionFCurves, FCurve, Action
+from bpy.types import Context, Event, Operator, Action
 from bpy.props import CollectionProperty, StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 import ntpath
@@ -194,15 +194,25 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                 msg_handler.debug_print(f" Amount of frames: {frame_amount[0]}")
                 
                 try:
-                    # Create animation action
-                    action_name = Path(file.name).stem
-                    action = bpy.data.actions.new(name=action_name)
+                    # ACTION SLOTS IMPLEMENTATION:
+                    # Create ONE action for the entire animation - all objects/bones will share this action
+                    # but each will have its own slot with isolated data paths.
+                    # This is only possible on newer Blender versions
+                    animation_name = Path(file.name).stem
+                    action = bpy.data.actions.new(name=animation_name)
+                    action.use_fake_user = True  # Prevent deletion on save
                     highest_frame = 0
                     
+                    # Import object-level animations (MESH and EMPTY objects)
                     for obj, index in found_objects:
-                        obj.animation_data_create().action = action
+                        # Assign the SAME action to this object
+                        # Blender will automatically create a separate slot for this object
+                        if obj.animation_data is None:
+                            obj.animation_data_create()
+                        obj.animation_data.action = action
                         
-                        #obj.keyframe_insert(data_path="rotation_quaternion", frame=0)
+                        # Keyframe the object - these keyframes go into this object's slot
+                        # No data path pollution because each object has its own slot
                         for count in range(rotation_keyframe_counts[index]):
                             animated_rotation, scaled_frame = rotation_frames[index][count]
                             frame = scaled_frame / FRAME_SCALE
@@ -214,7 +224,6 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                             obj.rotation_quaternion = rot
                             obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 
-                        #obj.keyframe_insert(data_path="location", frame=0)
                         for count in range(position_keyframe_counts[index]):
                             animated_position, scaled_frame = position_frames[index][count]
                             frame = scaled_frame / FRAME_SCALE
@@ -225,7 +234,6 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                             obj.location = animated_position
                             obj.keyframe_insert(data_path="location", frame=frame)
                         
-                        #obj.keyframe_insert(data_path="scale", frame=0)
                         for count in range(scale_keyframe_counts[index]):
                             animated_scale, scaled_frame = scale_frames[index][count]
                             frame = scaled_frame / FRAME_SCALE
@@ -236,8 +244,13 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                             obj.scale = animated_scale
                             obj.keyframe_insert(data_path="scale", frame=frame)
                     
+                    # Import bone animations (armature)
                     if target_armature and found_bones:
-                        target_armature.animation_data_create().action = action
+                        # Assign the SAME action to the armature
+                        # The armature gets its own slot within this action
+                        if target_armature.animation_data is None:
+                            target_armature.animation_data_create()
+                        target_armature.animation_data.action = action
                         
                         for bone_name, index in found_bones:
                             bone_id = skeleton_data.bone_name_to_id[bone_name]
@@ -298,161 +311,174 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
         return {"FINISHED"}
 
     def invoke(self, context: Context, event: Event):
-        return self.invoke_popup(context)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
 
 class CBB_FH_ImportAni(bpy.types.FileHandler):
-    bl_idname = "CBB_FH_ani_import"
-    bl_label = "File handler for ani imports"
-    bl_import_operator = CBB_OT_ImportAni.bl_idname
-    bl_file_extensions = CBB_OT_ImportAni.filename_ext
+    bl_idname = "CBB_FH_import_ani"
+    bl_label = "File handler for ANI import"
+    bl_import_operator = "cbb.ani_import"
+    bl_file_extensions = ".ANI"
 
     @classmethod
     def poll_drop(cls, context):
-        return (context.area and context.area.type == "VIEW_3D")
+        return (context.area and context.area.type == 'VIEW_3D')
+
 
 class CBB_OT_ExportAni(Operator, ExportHelper):
     bl_idname = "cbb.ani_export"
-    bl_label = "Export ani"
+    bl_label = "Export ANI"
     bl_options = {"PRESET"}
 
-    filename_ext = CBB_OT_ImportAni.filename_ext
+    filename_ext = ".ANI"
 
     filter_glob: StringProperty(default="*.ANI", options={"HIDDEN"}) # type: ignore
-
-    directory: StringProperty(subtype="FILE_PATH") # type: ignore
     
-    action_export_option: bpy.props.EnumProperty(
-        name="Action(s) to Export",
-        description="Choose an option to define what action(s) will be exported",
-        items=[
-            ("ACTIVE_ACTION", "Active Action", "Export only the currently active action"),
-            ("ACTIVE_COLLECTION_ACTIONS", "Active Collection Actions", "Export all actions among objects in the currently active collection"),
-            ("SELECTED_OBJECT_ACTIONS", "Selected Objects Actions", "Export all actions among objects in the current selection"),
-            ("ALL_ACTIONS", "All Actions", "Export All Scene Actions"),
-        ],
-        default='ALL_ACTIONS'
-    ) # type: ignore
-
     debug: BoolProperty(
-        name="Debug export",
-        description="Enabling this option will make the exporter print debug data to console",
+        name="Debug",
+        description="Enabling this option will print debug data to console",
         default=False
     ) # type: ignore
-
-    def execute(self, context):
-        return self.export_animations(context, self.directory)
     
-    def export_animations(self, context, directory):
-        
+    def execute(self, context):
+    
         msg_handler = Utils.MessageHandler(self.debug, self.report)
+        msg_handler.debug_print("Starting ANI export execution...")
         
-        # Dictionary to hold actions and the associated objects
+        directory = os.path.dirname(self.filepath)
+        msg_handler.debug_print(f"Export directory: {directory}")
+        
+        # ACTION SLOTS IMPLEMENTATION:
+        # Instead of exporting per-object actions, we export per-Action
+        # Each Action represents one complete animation (like one .ANI file)
+        
         actions_to_export = {}
-
-        # ACTIVE_ACTION: Export only the currently active action
-        if self.action_export_option == "ACTIVE_ACTION":
-            active_object = context.object
-            if active_object and active_object.animation_data and active_object.animation_data.action:
-                active_action = active_object.animation_data.action
-                actions_to_export[active_action] = [active_object]
+        msg_handler.debug_print("Collecting actions with linked objects...")
         
-        # ACTIVE_COLLECTION_ACTIONS: Export all actions among objects in the currently active collection
-        elif self.action_export_option == "ACTIVE_COLLECTION_ACTIONS":
-            active_collection = context.view_layer.active_layer_collection.collection
-            if active_collection:
-                for obj in active_collection.objects:
-                    if obj.animation_data and obj.animation_data.action:
-                        action = obj.animation_data.action
-                        if action not in actions_to_export:
-                            actions_to_export[action] = []
-                        actions_to_export[action].append(obj)
+        total_actions_scanned = 0
+        actions_with_objects = 0
+        
+        for action in bpy.data.actions:
+            if not action:
+                continue
+                
+            total_actions_scanned += 1
+            msg_handler.debug_print(f"  Processing action: '{action.name}' (users: {action.users})")
+            
+            linked_objects = []
+            
+            # Primary method: Action slots
+            if hasattr(action, "slots") and action.slots:
+                msg_handler.debug_print(f"    Action has {len(action.slots)} slot(s)")
+                
+                for slot in action.slots:
+                    identifier = slot.identifier
                     
-                    # Also check NLA strips for other linked actions
-                    if obj.animation_data and obj.animation_data.nla_tracks:
-                        nla_actions = Utils.get_actions_from_nla_tracks(obj)
-                        for nla_action in nla_actions:
-                            if nla_action not in actions_to_export:
-                                actions_to_export[nla_action] = []
-                            actions_to_export[nla_action].append(obj)
-        
-        # SELECTED_OBJECT_ACTIONS: Export all actions among objects in the current selection
-        elif self.action_export_option == "SELECTED_OBJECT_ACTIONS":
-            selected_objects = context.selected_objects
-            for obj in selected_objects:
-                if obj.animation_data and obj.animation_data.action:
-                    action = obj.animation_data.action
-                    if action not in actions_to_export:
-                        actions_to_export[action] = []
-                    actions_to_export[action].append(obj)
-                
-                # Also check NLA strips for other linked actions
-                if obj.animation_data and obj.animation_data.nla_tracks:
-                    nla_actions = Utils.get_actions_from_nla_tracks(obj)
-                    for nla_action in nla_actions:
-                        if nla_action not in actions_to_export:
-                            actions_to_export[nla_action] = []
-                        actions_to_export[nla_action].append(obj)
-
-        # ALL_ACTIONS: Export all scene actions
-        elif self.action_export_option == "ALL_ACTIONS":
-            all_actions = bpy.data.actions
-            for action in all_actions:
-                # Find objects using this action
-                linked_objects = []
-                for obj in bpy.data.objects:
-                    if obj.animation_data and (obj.animation_data.action == action):
-                        linked_objects.append(obj)
-                    elif obj.animation_data and obj.animation_data.nla_tracks:
-                        nla_actions = Utils.get_actions_from_nla_tracks(obj)
-                        if action in nla_actions:
+                    # Strip Blender's internal ID type prefix (OB = Object, AR = Armature, etc.)
+                    # The slot identifier uses format like "OBObjectName" but obj.name is just "ObjectName"
+                    if identifier.startswith("OB"):
+                        identifier = identifier[2:]
+                    
+                    msg_handler.debug_print(f"      Slot identifier: '{slot.identifier}' → object name: '{identifier}'")
+                    
+                    # Try to find matching object
+                    found = False
+                    for obj in bpy.data.objects:
+                        if obj.name == identifier and obj not in linked_objects:
                             linked_objects.append(obj)
-                
-                if linked_objects:
-                    actions_to_export[action] = linked_objects
-
-        # Now export all the collected actions
+                            msg_handler.debug_print(f"        → Found object: '{obj.name}' ({obj.type})")
+                            found = True
+                            break
+                    
+                    if not found:
+                        msg_handler.debug_print(f"      No object found for slot identifier: '{identifier}'")
+            
+            # Fallback: Check NLA tracks for stashed/pushed actions
+            nla_found_count = 0
+            for obj in bpy.data.objects:
+                if not (obj.animation_data and obj.animation_data.nla_tracks):
+                    continue
+                    
+                nla_actions = Utils.get_actions_from_nla_tracks(obj)
+                if action in nla_actions and obj not in linked_objects:
+                    linked_objects.append(obj)
+                    msg_handler.debug_print(f"      NLA fallback → Added object: '{obj.name}' ({obj.type}) from NLA track")
+                    nla_found_count += 1
+            
+            if nla_found_count > 0:
+                msg_handler.debug_print(f"    NLA fallback added {nla_found_count} object(s)")
+            
+            # Final decision for this action
+            if linked_objects:
+                actions_to_export[action] = linked_objects
+                actions_with_objects += 1
+                msg_handler.debug_print(f"  Action '{action.name}' will be exported — linked to {len(linked_objects)} object(s):")
+                for obj in linked_objects:
+                    msg_handler.debug_print(f"     • {obj.name} ({obj.type})")
+            else:
+                msg_handler.debug_print(f"  Action '{action.name}' has NO linked objects → skipped")
+        
+        msg_handler.debug_print(f"Summary: Found {actions_with_objects} exportable actions out of {total_actions_scanned} total actions")
+        msg_handler.debug_print(f"Actions to export: {len(actions_to_export)}")
+        
+        if not actions_to_export:
+            msg_handler.debug_print("No actions with linked objects found. Nothing to export.")
+            return {"FINISHED"}
+        
+        # Actually export each collected action
+        exported_count = 0
         for action, objects in actions_to_export.items():
+            msg_handler.debug_print(f"Exporting action: '{action.name}' ({len(objects)} objects)")
             self.export_action(action, objects, directory, msg_handler)
-
+            exported_count += 1
+        
+        msg_handler.debug_print(f"Export finished — processed {exported_count} action(s)")
+        
         return {"FINISHED"}
         
     def export_action(self, action: Action, action_objects: list[bpy.types.Object], directory: str, msg_handler: Utils.MessageHandler):
         print(f"Exporting action {action.name}")
         
+        # Save current state to restore later
         old_active_object = bpy.context.view_layer.objects.active
-        old_active_selected = bpy.context.view_layer.objects.active.select_get()
-        old_active_mode = bpy.context.view_layer.objects.active.mode
+        old_active_selected = old_active_object.select_get() if old_active_object else False
+        old_active_mode = old_active_object.mode if old_active_object else 'OBJECT'
         old_selection = [obj for obj in bpy.context.selected_objects]
-        old_active_action = bpy.context.view_layer.objects.active.animation_data.action
+        old_frame = bpy.context.scene.frame_current
+        old_actions = {}
         
-        bpy.ops.object.mode_set()
+        # Save all objects' current actions
+        for obj in action_objects:
+            if obj.animation_data:
+                old_actions[obj] = obj.animation_data.action
         
-        bpy.ops.object.select_all(action='DESELECT')
+        # Switch to object mode for evaluation
+        if old_active_object:
+            bpy.ops.object.mode_set(mode='OBJECT')
         
+        # ACTION SLOTS MANUAL EVALUATION:
+        # Instead of baking, we assign the action to all objects and manually step through frames
+        # This preserves Action Slots and properly evaluates constraints/drivers
+        # Baking the actions to NLA data was not working very well with the new slots implementation.
         
-        bpy.context.view_layer.objects.active = action_objects[0]
-        bpy.context.view_layer.objects.active.select_set(True)
-        bpy.context.view_layer.objects.active.animation_data.action = action
-        
-        bpy.ops.nla.bake(
-            frame_start=int(action.frame_range[0]),
-            frame_end=int(action.frame_range[1]),
-            only_selected=False,
-            visual_keying=True,
-            clear_constraints=False,
-            use_current_action=False,
-            bake_types={'POSE', 'OBJECT'}
-        )
-        
-        baked_action = action_objects[0].animation_data.action
+        for obj in action_objects:
+            # Ensure the object has the action assigned
+            if obj.animation_data is None:
+                obj.animation_data_create()
+            obj.animation_data.action = action
         
         filepath = bpy.path.ensure_ext(directory + "/" + action.name, self.filename_ext)
         
-        initial_frame = baked_action.frame_range[0]
-        last_frame = baked_action.frame_range[1]
-        # +1 to include the last frame
-        total_frames = int(last_frame+1 - initial_frame)
-        total_export_frames = int(last_frame+1 - initial_frame)+1
+        initial_frame = action.frame_range[0]
+        last_frame = action.frame_range[1]
+        
+        # FRAME COUNT CALCULATION:
+        # We export frames 0 through last_frame (inclusive)
+        # Total keyframes = last_frame + 1
+        # Example: frame_range (0, 69) → export frames 0-69 = 70 keyframes
+        total_frames = int(last_frame)  # For the frame count field
+        total_export_frames = int(last_frame) + 1  # Actual number of keyframes exported
         
         export_object_names = []
         export_unique_keyframe_counts = []
@@ -468,6 +494,8 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         
         msg_handler.debug_print(f"Animation [{action.name}] frame range: {int(action.frame_range[0])} - {int(action.frame_range[1])}")
         
+        # ACTION SLOTS: Each object in action_objects has its own slot within the same action
+        # We can iterate through them and export each slot's data
         for object in action_objects:
             
             if object.type in {"MESH", "EMPTY"}:
@@ -503,59 +531,82 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                 temp_position_keyframes = []
                 temp_scale_keyframes = []
                 
-                parent_matrix: Matrix = None
-                if object.parent:
-                    if object.parent_type == "BONE":
-                        bone = object.parent.pose.bones[object.parent_bone]
-                        # If the parent is a bone, object.parent refers to the armature itself, so we need to transform the bone matrix relative to the armature for the correct world matrix of the bone
-                        parent_matrix = object.parent.matrix_basis @ bone.matrix
-                    else:
-                        parent_matrix = object.parent.matrix_basis
-                else:
-                    parent_matrix = object.matrix_basis
+                # SIMPLIFIED OBJECT EXPORT:
+                # For objects, matrix_basis IS the local transform (what the animator keyframes).
+                # Unlike bones, objects don't have a separate "rest pose"
+                # We simply export matrix_basis for all frames including frame 0.
                 
-                object_local_matrix = parent_matrix.inverted() @ object.matrix_basis
+                depsgraph = bpy.context.evaluated_depsgraph_get()
                 
-                obj_local_pos = object_local_matrix.to_translation()
-                obj_local_rot = object_local_matrix.to_quaternion()
-                obj_local_scale = object_local_matrix.to_scale()
-                temp_rotation_keyframes.append(Quaternion((-obj_local_rot.w, obj_local_rot.x, obj_local_rot.y, obj_local_rot.z)))
-                temp_position_keyframes.append(obj_local_pos)
-                temp_scale_keyframes.append(obj_local_scale)
-                
-                for frame in range(int(action.frame_range[0]), int(action.frame_range[1]+1)):
+                # Export all frames starting from 0
+                for frame in range(0, int(action.frame_range[1]+1)):
+                    # Set the scene to this frame
+                    bpy.context.scene.frame_set(frame)
                     
-                    obj_animated_rotation = Utils.get_object_rotation_at_frame_fcurves(baked_action, object.name, frame)
-                    # Get the local rotation of the object, instead of the rest delta which is normal of Blender.
-                    local_animated_rotation = Utils.get_world_rotation(obj_local_rot, obj_animated_rotation)
-                    temp_rotation_keyframes.append(Quaternion((-local_animated_rotation.w, local_animated_rotation.x, local_animated_rotation.y, local_animated_rotation.z)))
+                    # Force update
+                    depsgraph.update()
                     
-                    obj_animated_position = Utils.get_object_location_at_frame_fcurves(baked_action, object.name, frame)
-                    local_animated_position = Utils.get_world_position(obj_local_pos, obj_local_rot, obj_animated_position)
-                    temp_position_keyframes.append(local_animated_position)
+                    # Get the evaluated object (this includes constraints, drivers, etc.)
+                    object_eval = object.evaluated_get(depsgraph)
                     
-                    obj_animated_scale = Utils.get_object_scale_at_frame_fcurves(baked_action, object.name, frame)
+                    # Read matrix_basis - this is the object's local transform (independent of parent)
+                    # This is what the animator keyframes and what the ANI format expects
+                    local_matrix = object_eval.matrix_basis
+                    
+                    obj_animated_rotation = local_matrix.to_quaternion()
+                    obj_animated_position = local_matrix.to_translation()
+                    obj_animated_scale = local_matrix.to_scale()
+                    
+                    # Convert to export format
+                    temp_rotation_keyframes.append(Quaternion((-obj_animated_rotation.w, obj_animated_rotation.x, obj_animated_rotation.y, obj_animated_rotation.z)))
+                    temp_position_keyframes.append(obj_animated_position)
                     temp_scale_keyframes.append(obj_animated_scale)
                     
                 if object.type == "MESH":
                     mesh: bpy.types.Mesh = object.data
                     mesh_polygons = mesh.polygons
                     
-                    amount_of_indices = sum((len(poly.loop_indices) - 2) * 3 for poly in mesh_polygons)
+                    # Group polygons by material (Logic must match msh.py)
+                    material_polygon_counts = {}
                     
-                    if amount_of_indices <= 65535:
-                            add_object_animation_data(object_name, total_frames, total_export_frames, temp_rotation_keyframes, temp_position_keyframes, temp_scale_keyframes)
+                    if not mesh_polygons:
+                        pass
                     else:
-                        print("Object's animation has to be split in chunks.")
-                
-                        maximum_split_amount = math.ceil(amount_of_indices / 65535.0)
-                        for object_number in range(0, maximum_split_amount):
-                            print(f"Exporting split number: {object_number}")
-                            split_object_name = f"{object_name}_{object_number}"
+                        for poly in mesh_polygons:
+                            mat_idx = poly.material_index if poly.material_index < len(object.material_slots) else 0
                             
-                            add_object_animation_data(split_object_name, total_frames, total_export_frames, temp_rotation_keyframes, temp_position_keyframes, temp_scale_keyframes)
+                            # Calculate indices for this polygon (triangulated)
+                            # 3 -> 3 indices
+                            # 4 -> 6 indices
+                            # n -> (n-2)*3 indices
+                            poly_indices_count = (len(poly.loop_indices) - 2) * 3
+                            
+                            if mat_idx not in material_polygon_counts:
+                                material_polygon_counts[mat_idx] = 0
+                            material_polygon_counts[mat_idx] += poly_indices_count
+
+                    # Iterate through groups and apply splitting logic
+                    # Sort keys to ensure deterministic order (though dicts are ordered in modern Python, explicit sort is safer for file stability)
+                    sorted_mat_indices = sorted(material_polygon_counts.keys())
                     
+                    for mat_idx in sorted_mat_indices:
+                        indices_count = material_polygon_counts[mat_idx]
+                        sub_object_base_name = f"{object_name}_{mat_idx}"
+                        
+                        if indices_count <= 65535:
+                            add_object_animation_data(sub_object_base_name, total_frames, total_export_frames, temp_rotation_keyframes, temp_position_keyframes, temp_scale_keyframes)
+                        else:
+                            print(f"Material Group {mat_idx} too large ({indices_count} indices). Splitting...")
+                            maximum_split_amount = math.ceil(indices_count / 65535.0)
+                            
+                            for split_number in range(0, maximum_split_amount):
+                                split_object_name = f"{sub_object_base_name}_{split_number}"
+                                add_object_animation_data(split_object_name, total_frames, total_export_frames, temp_rotation_keyframes, temp_position_keyframes, temp_scale_keyframes)
+                elif object.type == "EMPTY":
+                    # EMPTY objects export normally without splitting
+                    add_object_animation_data(object_name, total_frames, total_export_frames, temp_rotation_keyframes, temp_position_keyframes, temp_scale_keyframes)
             
+            # Export armature bone animations from this armature's slot in the action
             if object.type == "ARMATURE":
                 skeleton_data = SkeletonData(msg_handler)
                 skeleton_data.build_skeleton_from_armature(object, False)
@@ -577,30 +628,44 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                     temp_position_keyframes = []
                     temp_scale_keyframes = []
                     
+                    # Add binding pose as first keyframe (frame 0 in ANI format)
+                    # For bones, we always use the skeleton's rest pose data
                     obj_local_rot = skeleton_data.bone_local_rotations[bone_id]
                     temp_rotation_keyframes.append(Quaternion((-obj_local_rot.w, obj_local_rot.x, obj_local_rot.y, obj_local_rot.z)))
                     temp_position_keyframes.append(skeleton_data.bone_local_positions[bone_id])
                     temp_scale_keyframes.append(skeleton_data.bone_absolute_scales[bone_id])
                     
-                    for frame in range(int(action.frame_range[0]), int(action.frame_range[1]+1)):
+                    # MANUAL FRAME EVALUATION FOR BONES:
+                    # Export animation frames starting from frame 1
+                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                    
+                    for frame in range(1, int(action.frame_range[1]+1)):
+                        # Set the scene to this frame
+                        bpy.context.scene.frame_set(frame)
                         
-                        pose_bone_rotation = Utils.get_pose_bone_rotation_at_frame_fcurves(baked_action, pose_bone.name, frame)
-                        # Get the local rotation of the bone, instead of the rest delta which is normal of Blender.
+                        # Force update
+                        depsgraph.update()
+                        
+                        # Get the evaluated armature (includes constraints, drivers, etc.)
+                        object_eval = object.evaluated_get(depsgraph)
+                        pose_bone_eval = object_eval.pose.bones[bone_name]
+                        
+                        pose_bone_rotation = pose_bone_eval.rotation_quaternion.copy()
                         local_animated_rotation = Utils.get_world_rotation(skeleton_data.bone_local_rotations[bone_id], pose_bone_rotation)
                         temp_rotation_keyframes.append(Quaternion((-local_animated_rotation.w, local_animated_rotation.x, local_animated_rotation.y, local_animated_rotation.z)))
                         
-                        pose_bone_position = Utils.get_pose_bone_location_at_frame_fcurves(baked_action, pose_bone.name, frame)
+                        pose_bone_position = pose_bone_eval.location.copy()
                         local_animated_position = Utils.get_world_position(skeleton_data.bone_local_positions[bone_id], skeleton_data.bone_local_rotations[bone_id], pose_bone_position)
                         temp_position_keyframes.append(local_animated_position)
                         
-                        obj_animated_scale = Utils.get_pose_bone_scale_at_frame_fcurves(baked_action, pose_bone.name, frame)
+                        obj_animated_scale = pose_bone_eval.scale.copy()
                         temp_scale_keyframes.append(obj_animated_scale)
                         
                     export_rotation_keyframes[index] = temp_rotation_keyframes
                     export_position_keyframes[index] = temp_position_keyframes
                     export_scale_keyframes[index] = temp_scale_keyframes
                     
-                        
+        
         co_conv = Utils.CoordinatesConverter(CoordsSys.Blender, CoordsSys._3DSMax)
         with open(filepath, 'wb') as file:
             writer = Utils.Serializer(file, Utils.Serializer.Endianness.Little, Utils.Serializer.Quaternion_Order.XYZW, Utils.Serializer.Matrix_Order.ColumnMajor, co_conv)
@@ -639,26 +704,29 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                         writer.write_float(unknown)
                         writer.write_uint(frame_number*FRAME_SCALE)
         
+        # Restore previous state
+        bpy.context.scene.frame_set(old_frame)
         
-        bpy.context.view_layer.objects.active.animation_data.action = old_active_action
+        # Restore old actions
+        for obj, old_action in old_actions.items():
+            if obj.animation_data:
+                obj.animation_data.action = old_action
         
-        
-        
-        bpy.data.actions.remove(baked_action, do_unlink=True)
-        
-        
-        
+        # Restore selection and mode
         bpy.ops.object.select_all(action='DESELECT')
         
-        bpy.context.view_layer.objects.active = old_active_object
-        bpy.context.view_layer.objects.active.select_set(old_active_selected)
+        if old_active_object:
+            bpy.context.view_layer.objects.active = old_active_object
+            old_active_object.select_set(old_active_selected)
         
         for obj in old_selection:
             obj.select_set(True)
-        if old_active_mode != 'OBJECT':
+            
+        if old_active_object and old_active_mode != 'OBJECT':
             bpy.ops.object.mode_set(mode=old_active_mode)
         
-        
+        msg_handler.debug_print(f"Successfully exported animation '{action.name}' to {filepath}")
+
 
 def menu_func_import(self, context):
     self.layout.operator(CBB_OT_ImportAni.bl_idname, text="ANI (.ANI)")

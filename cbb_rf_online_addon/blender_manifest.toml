@@ -2,14 +2,14 @@ schema_version = "1.0.0"
 type = "add-on"
 id = "cbb_rf_online_addon"
 name = "RF Online importer/exporter"
-version = "0.0.1"
+version = "0.1.0"
 tagline = "Importer/exporter for MSH, BN, ANI files, importer only for BSP and R3E."
 description = "Importer/exporter for MSH, BN, ANI files, importer only for BSP and R3E."
 maintainer = "Cardboard Box"
 license = [
   "SPDX:GPL-3.0-or-later",
 ]
-blender_version_min = "4.3.0"
+blender_version_min = "5.0.0"
 tags = ["Import-Export"]
 wheels = [
   "./wheels/Wand-0.6.13-py2.py3-none-any.whl",

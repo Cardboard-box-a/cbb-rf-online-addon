@@ -533,16 +533,17 @@ class ImportBSP(Operator, ImportHelper):
                                         vector_math_node.inputs[1].default_value = (2.0, 2.0, 2.0)
                                         links.new(image_texture_node.outputs["Color"], vector_math_node.inputs[0])
                                         
-                                        mix_node = nodes.new(type='ShaderNodeMixRGB')
+                                        mix_node = nodes.new(type='ShaderNodeMix')
+                                        mix_node.data_type = 'RGBA'
                                         mix_node.location = (0, 200)
                                         mix_node.blend_type = 'MULTIPLY'  # You can change this to 'ADD', 'MULTIPLY', etc., as needed.
-                                        mix_node.inputs['Fac'].default_value = 1.0  # Set to full influence
+                                        mix_node.inputs['Factor'].default_value = 1.0  # Set to full influence
                                         
-                                        links.new(current_base_color_input.outputs[0], mix_node.inputs['Color1'])
+                                        links.new(current_base_color_input.outputs[0], mix_node.inputs['A'])
                                         
-                                        links.new(vector_math_node.outputs['Vector'], mix_node.inputs['Color2'])
+                                        links.new(vector_math_node.outputs['Vector'], mix_node.inputs['B'])
                                         
-                                        links.new(mix_node.outputs["Color"], bsdf.inputs['Base Color'])
+                                        links.new(mix_node.outputs["Result"], bsdf.inputs['Base Color'])
                                 
                                 
                                 
@@ -555,15 +556,10 @@ class ImportBSP(Operator, ImportHelper):
                                     obj.rotation_quaternion = animated_object.quat
                                     obj.scale = animated_object.scale
                                     if animated_object.frames > 0:
-                                        obj.animation_data_create()
-                                        action = bpy.data.actions.new(name="Object_Animation")
+                                        if obj.animation_data is None:
+                                            obj.animation_data_create()
+                                        action = bpy.data.actions.new(name=f"Anim_BSP_{material_name}")
                                         obj.animation_data.action = action
-
-                                        fcurves = {
-                                            "location": [action.fcurves.new(data_path="location", index=i) for i in range(3)],
-                                            "rotation_quaternion": [action.fcurves.new(data_path="rotation_quaternion", index=i) for i in range(4)],
-                                            "scale": [action.fcurves.new(data_path="scale", index=i) for i in range(3)]
-                                        }
 
                                         for i in range(animated_object.pos_count):
                                             offset = animated_object.pos_offset + i * 16
@@ -571,9 +567,8 @@ class ImportBSP(Operator, ImportHelper):
                                             #converted_position = co_conv_3ds_blend.convert_vector3f(Vector((pos_x, pos_y, pos_z)))
                                             converted_position = Vector((pos_x, pos_y, pos_z))
                                             
-                                            fcurves["location"][0].keyframe_points.insert(frame, converted_position.x*SCALE_FACTOR)
-                                            fcurves["location"][1].keyframe_points.insert(frame, converted_position.y*SCALE_FACTOR)
-                                            fcurves["location"][2].keyframe_points.insert(frame, converted_position.z*SCALE_FACTOR)
+                                            obj.location = converted_position * SCALE_FACTOR
+                                            obj.keyframe_insert(data_path="location", frame=frame)
 
                                         for i in range(animated_object.rot_count):
                                             offset = animated_object.rot_offset + i * 20
@@ -581,11 +576,8 @@ class ImportBSP(Operator, ImportHelper):
                                             frame, rot_x, rot_y, rot_z, rot_w = struct.unpack_from("<f4f", tracks, offset)
                                             
                                             converted_rotation = Quaternion((rot_w, rot_x, rot_y, -rot_z))
-                                                
-                                            fcurves["rotation_quaternion"][0].keyframe_points.insert(frame, converted_rotation.w)
-                                            fcurves["rotation_quaternion"][1].keyframe_points.insert(frame, converted_rotation.x)
-                                            fcurves["rotation_quaternion"][2].keyframe_points.insert(frame, converted_rotation.y)
-                                            fcurves["rotation_quaternion"][3].keyframe_points.insert(frame, converted_rotation.z)
+                                            obj.rotation_quaternion = converted_rotation
+                                            obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 
                                         for i in range(animated_object.scale_count):
                                             offset = animated_object.scale_offset + i * 32
@@ -593,9 +585,9 @@ class ImportBSP(Operator, ImportHelper):
                                             scale_quat = Quaternion((scale_axis_w, scale_axis_x, scale_axis_y, scale_axis_z))
                                             scale_vec = Vector((scale_x, scale_y, scale_z))
                                             scale_vec.rotate(scale_quat)
-                                            fcurves["scale"][0].keyframe_points.insert(frame, scale_vec.x)
-                                            fcurves["scale"][1].keyframe_points.insert(frame, scale_vec.y)
-                                            fcurves["scale"][2].keyframe_points.insert(frame, scale_vec.z)
+                                            
+                                            obj.scale = scale_vec
+                                            obj.keyframe_insert(data_path="scale", frame=frame)
                                 
                         except Exception as e:
                             print(f"Exception while reading material number [{progress-1}]: {e}")

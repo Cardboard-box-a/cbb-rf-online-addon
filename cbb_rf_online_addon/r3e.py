@@ -164,6 +164,12 @@ class ImportR3E(Operator, ImportHelper):
         created_objects = []  # Include static object in created objects list
         
         
+        # Create Entity Action (One per entity)
+        entity_action = None
+        if any(animated_object.frames > 0 for animated_object in animated_objects):
+            entity_action = bpy.data.actions.new(name=f"Anim_{entity_name}")
+            entity_action.use_fake_user = True
+
         for material_group in material_groups:
             if material_group.material_id != -1:
                 material_id: int = material_group.material_id
@@ -256,16 +262,10 @@ class ImportR3E(Operator, ImportHelper):
                     animated_obj.rotation_quaternion = animated_object.quat
                     animated_obj.scale = animated_object.scale
                     
-                    if animated_object.frames > 0:
-                        animated_obj.animation_data_create()
-                        action = bpy.data.actions.new(name="Object_Animation")
-                        animated_obj.animation_data.action = action
-
-                        fcurves = {
-                            "location": [action.fcurves.new(data_path="location", index=i) for i in range(3)],
-                            "rotation_quaternion": [action.fcurves.new(data_path="rotation_quaternion", index=i) for i in range(4)],
-                            "scale": [action.fcurves.new(data_path="scale", index=i) for i in range(3)]
-                        }
+                    if animated_object.frames > 0 and entity_action:
+                        if animated_obj.animation_data is None:
+                            animated_obj.animation_data_create()
+                        animated_obj.animation_data.action = entity_action
 
                         # Add keyframes for position
                         for i in range(animated_object.pos_count):
@@ -273,23 +273,17 @@ class ImportR3E(Operator, ImportHelper):
                             frame, pos_x, pos_y, pos_z = struct.unpack_from("<f3f", tracks, offset)
                             
                             converted_position = Vector((pos_x, pos_y, pos_z))
-                            
-                            fcurves["location"][0].keyframe_points.insert(frame, converted_position.x*SCALE_FACTOR)
-                            fcurves["location"][1].keyframe_points.insert(frame, converted_position.y*SCALE_FACTOR)
-                            fcurves["location"][2].keyframe_points.insert(frame, converted_position.z*SCALE_FACTOR)
+                            animated_obj.location = converted_position * SCALE_FACTOR
+                            animated_obj.keyframe_insert(data_path="location", frame=frame)
 
                         # Add keyframes for rotation
                         for i in range(animated_object.rot_count):
                             offset = animated_object.rot_offset + i * 20
-                            
                             frame, rot_x, rot_y, rot_z, rot_w = struct.unpack_from("<f4f", tracks, offset)
                             
                             converted_rotation = Quaternion((rot_w, rot_x, rot_y, -rot_z))
-                                
-                            fcurves["rotation_quaternion"][0].keyframe_points.insert(frame, converted_rotation.w)
-                            fcurves["rotation_quaternion"][1].keyframe_points.insert(frame, converted_rotation.x)
-                            fcurves["rotation_quaternion"][2].keyframe_points.insert(frame, converted_rotation.y)
-                            fcurves["rotation_quaternion"][3].keyframe_points.insert(frame, converted_rotation.z)
+                            animated_obj.rotation_quaternion = converted_rotation
+                            animated_obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 
                         # Add keyframes for scale
                         for i in range(animated_object.scale_count):
@@ -298,9 +292,9 @@ class ImportR3E(Operator, ImportHelper):
                             scale_quat = Quaternion((scale_axis_w, scale_axis_x, scale_axis_y, scale_axis_z))
                             scale_vec = Vector((scale_x, scale_y, scale_z))
                             scale_vec.rotate(scale_quat)
-                            fcurves["scale"][0].keyframe_points.insert(frame, scale_vec.x)
-                            fcurves["scale"][1].keyframe_points.insert(frame, scale_vec.y)
-                            fcurves["scale"][2].keyframe_points.insert(frame, scale_vec.z)
+                            
+                            animated_obj.scale = scale_vec
+                            animated_obj.keyframe_insert(data_path="scale", frame=frame)
 
                     if animated_obj.parent is None:
                         animated_obj.parent = static_object

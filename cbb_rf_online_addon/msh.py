@@ -134,102 +134,136 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                 break
             mesh_file_path = parent_path
 
+        target_filename_stem = os.path.splitext(texture_name)[0]
+        target_filename_stem_lower = target_filename_stem.casefold()
+        
         # Determine textures folder path
         textures_folder = os.path.normpath(os.path.join(mesh_file_path, "../Tex/"))
         if not os.path.exists(textures_folder):
             self.report({"INFO"}, f"Textures folder does not exist: {textures_folder}")
-            return None, None
 
-        target_filename_stem = os.path.splitext(texture_name)[0]
-        target_filename_stem_lower = target_filename_stem.casefold()
+        if os.path.exists(textures_folder) :
+            # Search for loose .dds files
+            for root, _, files_in_dir in os.walk(textures_folder):
+                for found_file in files_in_dir:
+                    found_file_stem, found_file_ext = os.path.splitext(found_file)
+                    if found_file_stem.casefold() == target_filename_stem_lower:
+                        if found_file_ext.casefold() == ".dds":
+                            full_texture_path = os.path.join(root, found_file)
+                            
+                            # Analyze BEFORE loading into Blender
+                            try:
+                                alpha_analysis = texture_utils.analyze_dds_alpha(full_texture_path)
+                            except Exception as e:
+                                print(f"    Warning: Alpha analysis failed: {e}")
+                                alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                            
+                            # Now load the texture
+                            try:
+                                print(f"    Attempt succeeded: texture loaded from loose file in disk.")
+                                blender_image = bpy.data.images.load(full_texture_path, check_existing=True)
+                                blender_image.pack()
+                                return blender_image, alpha_analysis
+                            except RuntimeError as e:
+                                self.report({"WARNING"}, f"Found texture file '{full_texture_path}' but failed to load: {e}")
+                            except Exception as e:
+                                self.report({"ERROR"}, f"Unexpected error loading loose texture '{full_texture_path}': {e}")
+                                traceback.print_exc()
+                                return None, None
+            
+            # List all .rfs files in the textures folder
+            rfs_files = [file for file in os.listdir(textures_folder) if file.casefold().endswith('.rfs')]
 
-        # Search for loose .dds files
-        for root, _, files_in_dir in os.walk(textures_folder):
+            for file_path in rfs_files:
+                try:
+                    full_file_path = os.path.join(textures_folder, file_path)
+                    with open(full_file_path, "rb") as opened_file:
+                        file_count = struct.unpack("<I", opened_file.read(4))[0]
+
+                        for _ in range(file_count):
+                            file_name = opened_file.read(56).split(b"\x00")[0].decode("euc-kr")
+                            file_offset = struct.unpack("<I", opened_file.read(4))[0]
+                            file_size = struct.unpack("<I", opened_file.read(4))[0]
+                            
+                            if os.path.splitext(file_name)[0].casefold() == os.path.splitext(texture_name)[0].casefold():
+                                opened_file.seek(file_offset, 0)
+                                dds_header = bytearray(opened_file.read(128))
+
+                                # Decrypt header if needed
+                                if dds_header[:4] != b'DDS ':
+                                    dds_header = RFShared.unlock_dds(list(struct.unpack('<32I', dds_header)))
+                                    dds_header = struct.pack('<32I', *dds_header)
+
+                                # Read texture data
+                                texture_data = opened_file.read(file_size - 128)
+
+                                # Create temporary file for analysis
+                                temp_file = tempfile.NamedTemporaryFile(suffix=".dds", delete=False)
+                                temp_file.write(dds_header)
+                                temp_file.write(texture_data)
+                                temp_file.flush()
+                                temp_file.close()
+                                
+                                # Analyze the temp file
+                                try:
+                                    alpha_analysis = texture_utils.analyze_dds_alpha(temp_file.name)
+                                except Exception as e:
+                                    print(f"    Warning: Alpha analysis failed: {e}")
+                                    alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                                
+                                # Load into Blender
+                                blender_image = bpy.data.images.load(temp_file.name)
+                                blender_image.name = texture_name
+                                blender_image.pack()
+                                
+                                # Clean up temp file
+                                try:
+                                    os.remove(temp_file.name)
+                                except:
+                                    pass
+                                
+                                print(f"    Attempt succeeded: texture loaded from inside RFS files.")
+                                
+                                return blender_image, alpha_analysis
+
+                except (OSError, IOError) as e:
+                    self.report({"ERROR"}, f"Error while opening file at [{file_path}]: {e}")
+                    traceback.print_exc()
+                    return None, None
+            
+        # If no texture found yet, search in the mesh file path for ANY matching file name. This logic can find even .png or other texture formats
+        
+        search_dir = mesh_file_path
+        print(f"    Fallback: Searching in {search_dir} for ANY match for {target_filename_stem}")
+        
+        for root, _, files_in_dir in os.walk(search_dir):
             for found_file in files_in_dir:
                 found_file_stem, found_file_ext = os.path.splitext(found_file)
                 if found_file_stem.casefold() == target_filename_stem_lower:
+                    # Found a match with ANY extension
+                    full_texture_path = os.path.join(root, found_file)
+                    
+                    # Try to analyze/load
+                    # If it's DDS, do analysis
                     if found_file_ext.casefold() == ".dds":
-                        full_texture_path = os.path.join(root, found_file)
-                        
-                        # Analyze BEFORE loading into Blender
                         try:
                             alpha_analysis = texture_utils.analyze_dds_alpha(full_texture_path)
                         except Exception as e:
                             print(f"    Warning: Alpha analysis failed: {e}")
                             alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
-                        
-                        # Now load the texture
-                        try:
-                            print(f"    Attempt succeeded: texture loaded from loose file in disk.")
-                            blender_image = bpy.data.images.load(full_texture_path, check_existing=True)
-                            blender_image.pack()
-                            return blender_image, alpha_analysis
-                        except RuntimeError as e:
-                            self.report({"WARNING"}, f"Found texture file '{full_texture_path}' but failed to load: {e}")
-                        except Exception as e:
-                            self.report({"ERROR"}, f"Unexpected error loading loose texture '{full_texture_path}': {e}")
-                            traceback.print_exc()
-                            return None, None
-        
-        # List all .rfs files in the textures folder
-        rfs_files = [file for file in os.listdir(textures_folder) if file.casefold().endswith('.rfs')]
+                    else:
+                        alpha_analysis = {'mode': 'OPAQUE', 'threshold': 0.5, 'has_alpha': False}
 
-        for file_path in rfs_files:
-            try:
-                full_file_path = os.path.join(textures_folder, file_path)
-                with open(full_file_path, "rb") as opened_file:
-                    file_count = struct.unpack("<I", opened_file.read(4))[0]
+                    try:
+                        print(f"    Fallback succeeded: texture loaded from {full_texture_path}")
+                        blender_image = bpy.data.images.load(full_texture_path, check_existing=True)
+                        blender_image.pack()
+                        return blender_image, alpha_analysis
+                    except RuntimeError as e:
+                        self.report({"WARNING"}, f"Found fallback texture '{full_texture_path}' but failed to load: {e}")
+                    except Exception as e:
+                        print(f"    Error loading fallback texture '{full_texture_path}': {e}")
 
-                    for _ in range(file_count):
-                        file_name = opened_file.read(56).split(b"\x00")[0].decode("euc-kr")
-                        file_offset = struct.unpack("<I", opened_file.read(4))[0]
-                        file_size = struct.unpack("<I", opened_file.read(4))[0]
-                        
-                        if os.path.splitext(file_name)[0].casefold() == os.path.splitext(texture_name)[0].casefold():
-                            opened_file.seek(file_offset, 0)
-                            dds_header = bytearray(opened_file.read(128))
-
-                            # Decrypt header if needed
-                            if dds_header[:4] != b'DDS ':
-                                dds_header = RFShared.unlock_dds(list(struct.unpack('<32I', dds_header)))
-                                dds_header = struct.pack('<32I', *dds_header)
-
-                            # Read texture data
-                            texture_data = opened_file.read(file_size - 128)
-
-                            # Create temporary file for analysis
-                            temp_file = tempfile.NamedTemporaryFile(suffix=".dds", delete=False)
-                            temp_file.write(dds_header)
-                            temp_file.write(texture_data)
-                            temp_file.flush()
-                            temp_file.close()
-                            
-                            # Analyze the temp file
-                            try:
-                                alpha_analysis = texture_utils.analyze_dds_alpha(temp_file.name)
-                            except Exception as e:
-                                print(f"    Warning: Alpha analysis failed: {e}")
-                                alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
-                            
-                            # Load into Blender
-                            blender_image = bpy.data.images.load(temp_file.name)
-                            blender_image.name = texture_name
-                            blender_image.pack()
-                            
-                            # Clean up temp file
-                            try:
-                                os.remove(temp_file.name)
-                            except:
-                                pass
-                            
-                            print(f"    Attempt succeeded: texture loaded from inside RFS files.")
-                            
-                            return blender_image, alpha_analysis
-
-            except (OSError, IOError) as e:
-                self.report({"ERROR"}, f"Error while opening file at [{file_path}]: {e}")
-                traceback.print_exc()
-                return None, None
 
         return None, None
     
@@ -280,7 +314,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
 
         specular_value = mat.node_tree.nodes.new(type="ShaderNodeValue")
         specular_value.outputs[0].default_value = 0.0
-        mat.node_tree.links.new(specular_value.outputs[0], bsdf.inputs[13])
+        mat.node_tree.links.new(specular_value.outputs[0], bsdf.inputs['Specular IOR Level'])
         
         # Apply alpha mode based on analysis
         alpha_mode = alpha_analysis.get('mode', 'OPAQUE')
@@ -1039,138 +1073,221 @@ class CBB_OT_ExportMSH(Operator, ExportHelper):
                             # Step 1: Get original vertices
                             original_mesh_vertices = [v.co for v in mesh_vertices]
 
-                            # Step 2: Construct collection of vertex index and UVs from loops
-                            # loop_data holds a collection of tuples that each contain the index of a vertex in mesh_vertices and raw uv and normal data for the vertex.
-                            loop_data = []
-                            for poly in mesh_polygons:
-                                for loop_index in poly.loop_indices:
-                                    loop = mesh_loops[loop_index]
-                                    uv = tuple((mesh_uvs[loop.index].uv)) if mesh_uvs else (0.0, 0.0)
-                                    normal = tuple(loop.normal)
-                                    loop_data.append((loop.vertex_index, uv, normal))
+                            # --- NEW LOGIC: Group Polygons by Material Index ---
+                            material_polygon_groups = {}
+                            if not mesh_polygons:
+                                # Handle empty mesh case if needed, or just skip
+                                pass
+                            else:
+                                for poly in mesh_polygons:
+                                    # If face has no material, default to 0
+                                    mat_idx = poly.material_index if poly.material_index < len(object.material_slots) else 0
+                                    if mat_idx not in material_polygon_groups:
+                                        material_polygon_groups[mat_idx] = []
+                                    material_polygon_groups[mat_idx].append(poly)
 
-                            # Step 4: Create unique vertices collection
-                            # Unique as in this combination of vertex + uv + normal at n index is not repeated anywhere in these collections
-                            unique_vertex_indices = []
-                            unique_uvs = []
-                            unique_normals = []
-                            seen_pairs = set()
-
-                            for vertex_index, uv, normal in loop_data:
-                                if (vertex_index, uv, normal) not in seen_pairs:
-                                    unique_vertex_indices.append(vertex_index)
-                                    unique_uvs.append(tuple(uv))
-                                    unique_normals.append(tuple(normal))
-                                    seen_pairs.add((vertex_index, uv, normal))
-
-                            # Step 5: Build exporter vertex collection
-                            
-                            mesh_vertex_to_export_vertex_map = {}
-                            unique_bones_used = set()
-                            unique_bones_used_indices = {}
-                            for i, (vertex_index, uv, normal) in enumerate(zip(unique_vertex_indices, unique_uvs, unique_normals)):
-                                exporter_vertices.append(original_mesh_vertices[vertex_index])
-                                exporter_normals.append(normal)
-                                exporter_uvs.append(uv)
-
-                                mesh_vertex_to_export_vertex_map[(vertex_index, uv, normal)] = i
-
-                                # Get bone weights
-                                mesh_vertex = mesh_vertices[vertex_index]
-                                groups = mesh_vertex.groups
+                            # Iterate through each material group and export as a sub-object
+                            for mat_idx, group_polys in material_polygon_groups.items():
                                 
-                                bone_weight_pairs = []
-                                for group in groups:
-                                    bone_name = object.vertex_groups[group.group].name
-                                    if bone_name not in unique_bones_used:
-                                        unique_bones_used_indices[bone_name] = len(unique_bones_list)
-                                        unique_bones_used.add(bone_name)
-                                        unique_bones_list.append(bone_name)
+                                # 1. Resolve Texture for this specific material using the helper logic
+                                current_material = None
+                                if mat_idx < len(object.material_slots):
+                                    current_material = object.material_slots[mat_idx].material
+                                
+                                current_texture_path = ""
+                                if current_material and current_material.use_nodes:
+                                    mat_albedo_texture = None
+                                    node_tree = current_material.node_tree
+                                    for node in node_tree.nodes:
+                                        if node.type == 'BSDF_PRINCIPLED':
+                                            mat_albedo_texture = Utils.find_image_texture_for_input(node, 'Base Color')
+                                            break
                                     
-                                    bone_index = unique_bones_used_indices[bone_name]
-                                    bone_weight_pairs.append((bone_index, group.weight))
+                                    if mat_albedo_texture:
+                                        current_texture_path = f"D:\\{mat_albedo_texture.name}"
                                 
-                                # Sort the bone-weight pairs by weight in descending order
-                                bone_weight_pairs.sort(key=lambda x: x[1], reverse=True)
+                                # For now, we follow the plan: look for texture for EACH material slot.
+                                if not current_texture_path:
+                                    # Fallback to empty or keep previous logic if strictly required, 
+                                    # but user requested specific lookup.
+                                    current_texture_path = ""
 
-                                # Keep the top 4 bones
-                                bone_weight_pairs = bone_weight_pairs[:4]
+                                msg_handler.debug_print(f"Processing Material Group {mat_idx} for Object [{object.name}]. Texture: {current_texture_path}")
 
-                                # Split the bone indices and weights
-                                bone_indices, weights = zip(*bone_weight_pairs) if bone_weight_pairs else ([], [])
-
-                                if len(weights) > 3:
-                                    weights = weights[:3]
-                                else:
-                                    weights = list(weights) + [0.0] * (3 - len(bone_indices))
-
-                                # Ensure exactly 4 bone indices, padding with 0 if necessary
-                                bone_indices = list(bone_indices) + [-1] * (4 - len(bone_indices))
-
-                                exporter_weights.append((weights, bone_indices))
+                                # 2. Process Geometry for THIS group
                                 
-                            # Rebuild polygon indices
-                            for poly in mesh_polygons:
-                                poly_indices = []
-                                for loop_index in poly.loop_indices:
-                                    loop = mesh_loops[loop_index]
-                                    uv = tuple(mesh_uvs[loop.index].uv) if mesh_uvs else (0.0, 0.0)
-                                    normal = tuple(loop.normal)
-                                    poly_indices.append(mesh_vertex_to_export_vertex_map[(loop.vertex_index, uv, normal)])
+                                # --- OPTIMIZATION START ---
+                                
+                                # Pre-cache bone names to avoid API calls inside the loop
+                                # Maps group index -> bone name
+                                group_index_to_bone_name = {g.index: g.name for g in object.vertex_groups}
 
-                                amount_of_polys = len(poly_indices)
+                                # Prepare storage for this group
+                                group_exporter_vertices = []
+                                group_exporter_normals = []
+                                group_exporter_uvs = []
+                                group_exporter_weights = []
+                                group_exporter_polygons = []
                                 
-                                if amount_of_polys == 3:
-                                    # If the polygon is already a triangle, just add it directly
-                                    exporter_polygons.append(poly_indices)
-                                elif amount_of_polys == 4:
-                                    # If the polygon is a quad, split it into two triangles
-                                    exporter_polygons.append([poly_indices[0], poly_indices[1], poly_indices[2]])
-                                    exporter_polygons.append([poly_indices[0], poly_indices[2], poly_indices[3]])
-                                else:
-                                    # Handle polygons with more than 4 vertices (n-gons)
-                                    v0 = poly_indices[0]
-                                    for i in range(1, amount_of_polys - 1):
-                                        exporter_polygons.append([v0, poly_indices[i], poly_indices[i + 1]])
-                            
-                            # Polygons are already triangulated, final indice amount will be it's length * 3
-                            polygon_indices_amount = len(exporter_polygons)*3
-                            
-                            msg_handler.debug_print(f"Object [{object.name}]'s vertex amount for export: [{len(exporter_vertices)}]")
-                            msg_handler.debug_print(f"Object [{object.name}]'s polygon amount for export: [{len(exporter_polygons)}]")
-                        
-                        if polygon_indices_amount <= 65535:
-                            __add_object_data(object_amount, object_name, object_parent_name, object_world_matrix, object_local_matrix, exporter_vertices, exporter_normals, exporter_uvs, exporter_polygons, exporter_weights, unique_bones_list, object_texture_path, "")
-                        else:
-                            Utils.debug_print("Object has to be split in chunks.")
-                            maximum_split_amount = math.ceil(polygon_indices_amount / 65535.0)
-                            for object_number in range(0, maximum_split_amount):
-                                Utils.debug_print(f"Exporting split number: {object_number}")
-                                split_object_name = f"{object_name}_{object_number}"
-                                split_exporter_vertices:list[Vector] = []
-                                split_exporter_normals = []
-                                split_exporter_uvs = []
-                                split_exporter_polygons = []
-                                split_exporter_weights = []
+                                # Map (vertex_index, uv, normal) -> new_index for split detection
+                                mesh_vertex_to_export_vertex_map = {}
                                 
-                                exporter_vertex_to_split_vertex_map = {}
-                                for poly_to_split_index in range (21845*object_number, 21845*(object_number+1)):
-                                    if poly_to_split_index >= len(exporter_polygons):
-                                        break
-                                    
+                                # Unique bones used in this specific material group
+                                group_unique_bones_used = set()
+                                group_unique_bones_used_indices = {}
+                                group_unique_bones_list = [] 
+
+                                for poly in group_polys:
                                     poly_indices = []
-                                    for vertex_index in exporter_polygons[poly_to_split_index]:
-                                        if vertex_index not in exporter_vertex_to_split_vertex_map:
-                                            split_exporter_vertices.append(exporter_vertices[vertex_index])
-                                            split_exporter_normals.append(exporter_normals[vertex_index])
-                                            split_exporter_uvs.append(exporter_uvs[vertex_index])
-                                            split_exporter_weights.append(exporter_weights[vertex_index])
-                                            exporter_vertex_to_split_vertex_map[vertex_index] = len(split_exporter_vertices)-1
-                                        poly_indices.append(exporter_vertex_to_split_vertex_map[vertex_index])
-                                    split_exporter_polygons.append([poly_indices[0], poly_indices[1], poly_indices[2]])
+                                    for loop_index in poly.loop_indices:
+                                        loop = mesh_loops[loop_index]
+                                        uv = tuple(mesh_uvs[loop.index].uv) if mesh_uvs else (0.0, 0.0)
+                                        normal = tuple(loop.normal)
                                         
+                                        # Key for uniqueness
+                                        vertex_key = (loop.vertex_index, uv, normal)
+                                        
+                                        if vertex_key not in mesh_vertex_to_export_vertex_map:
+                                            # New unique vertex found
+                                            new_index = len(group_exporter_vertices)
+                                            mesh_vertex_to_export_vertex_map[vertex_key] = new_index
+                                            
+                                            # Add geometry data
+                                            group_exporter_vertices.append(original_mesh_vertices[loop.vertex_index])
+                                            group_exporter_normals.append(normal)
+                                            group_exporter_uvs.append(uv)
+                                            
+                                            # Process Bone Weights Immediatelly
+                                            mesh_vertex = mesh_vertices[loop.vertex_index]
+                                            groups = mesh_vertex.groups
+                                            
+                                            bone_weight_pairs = []
+                                            for group in groups:
+                                                # Use cached bone name login
+                                                bone_name = group_index_to_bone_name.get(group.group)
+                                                if not bone_name: continue
+                                                
+                                                if bone_name not in group_unique_bones_used:
+                                                    group_unique_bones_used_indices[bone_name] = len(group_unique_bones_list)
+                                                    group_unique_bones_used.add(bone_name)
+                                                    group_unique_bones_list.append(bone_name)
+                                                
+                                                bone_index = group_unique_bones_used_indices[bone_name]
+                                                bone_weight_pairs.append((bone_index, group.weight))
+                                            
+                                            # Sort & Limit Weights (same logic as before)
+                                            bone_weight_pairs.sort(key=lambda x: x[1], reverse=True)
+                                            bone_weight_pairs = bone_weight_pairs[:4]
+                                            
+                                            bone_indices, weights = zip(*bone_weight_pairs) if bone_weight_pairs else ([], [])
+                                            
+                                            if len(weights) > 3:
+                                                weights = weights[:3]
+                                            else:
+                                                weights = list(weights) + [0.0] * (3 - len(bone_indices))
+                                            
+                                            bone_indices = list(bone_indices) + [-1] * (4 - len(bone_indices))
+                                            
+                                            group_exporter_weights.append((weights, bone_indices))
+                                        
+                                        # Use the mapped index
+                                        poly_indices.append(mesh_vertex_to_export_vertex_map[vertex_key])
+
+                                    # Triangulate directly
+                                    amount_of_polys = len(poly_indices)
+                                    if amount_of_polys == 3:
+                                        group_exporter_polygons.append(poly_indices)
+                                    elif amount_of_polys == 4:
+                                        group_exporter_polygons.append([poly_indices[0], poly_indices[1], poly_indices[2]])
+                                        group_exporter_polygons.append([poly_indices[0], poly_indices[2], poly_indices[3]])
+                                    else:
+                                        v0 = poly_indices[0]
+                                        for k in range(1, amount_of_polys - 1):
+                                            group_exporter_polygons.append([v0, poly_indices[k], poly_indices[k + 1]])
+
+                                # --- OPTIMIZATION END ---
+
+                                # 3. Recursive Splitting / Export for THIS material group
+                                polygon_indices_amount = len(group_exporter_polygons) * 3
                                 
-                                __add_object_data(object_amount, split_object_name, object_parent_name, object_world_matrix, object_local_matrix, split_exporter_vertices, split_exporter_normals, split_exporter_uvs, split_exporter_polygons, split_exporter_weights, unique_bones_list, object_texture_path, "")
+                                # Use a suffix for material index to allow multiple "objects" from one mesh
+                                # e.g. "MyMesh_0", "MyMesh_1" if using mat index, 
+                                # BUT we might already have _0 from original splitting logic. 
+                                # Safe bet: {object_name}_{mat_idx}
+                                sub_object_base_name = f"{object_name}_{mat_idx}"
+                                
+                                msg_handler.debug_print(f"Material Group {mat_idx}: {len(group_exporter_vertices)} verts, {len(group_exporter_polygons)} polys")
+
+                                if polygon_indices_amount <= 65535:
+                                    # Fits in one chunk
+                                    __add_object_data(
+                                        object_amount, 
+                                        sub_object_base_name, 
+                                        object_parent_name, 
+                                        object_world_matrix, 
+                                        object_local_matrix, 
+                                        group_exporter_vertices, 
+                                        group_exporter_normals, 
+                                        group_exporter_uvs, 
+                                        group_exporter_polygons, 
+                                        group_exporter_weights, 
+                                        group_unique_bones_list, 
+                                        current_texture_path, 
+                                        ""
+                                    )
+                                else:
+                                    # Needs splitting
+                                    msg_handler.debug_print(f"Material Group {mat_idx} too large ({polygon_indices_amount} indices). Splitting...")
+                                    maximum_split_amount = math.ceil(polygon_indices_amount / 65535.0)
+                                    
+                                    for split_number in range(0, maximum_split_amount):
+                                        split_object_name = f"{sub_object_base_name}_{split_number}"
+                                        
+                                        split_exporter_vertices = []
+                                        split_exporter_normals = []
+                                        split_exporter_uvs = []
+                                        split_exporter_polygons = []
+                                        split_exporter_weights = []
+                                        
+                                        exporter_vertex_to_split_vertex_map = {}
+                                        
+                                        # Calculate range of triangles for this split
+                                        start_poly = 21845 * split_number
+                                        end_poly = 21845 * (split_number + 1)
+                                        
+                                        # Slice the polygons for this split
+                                        # Using manual loop to remap vertices
+                                        for poly_to_split_index in range(start_poly, end_poly):
+                                            if poly_to_split_index >= len(group_exporter_polygons):
+                                                break
+                                            
+                                            poly_indices = []
+                                            for vertex_index in group_exporter_polygons[poly_to_split_index]:
+                                                if vertex_index not in exporter_vertex_to_split_vertex_map:
+                                                    split_exporter_vertices.append(group_exporter_vertices[vertex_index])
+                                                    split_exporter_normals.append(group_exporter_normals[vertex_index])
+                                                    split_exporter_uvs.append(group_exporter_uvs[vertex_index])
+                                                    split_exporter_weights.append(group_exporter_weights[vertex_index])
+                                                    exporter_vertex_to_split_vertex_map[vertex_index] = len(split_exporter_vertices)-1
+                                                poly_indices.append(exporter_vertex_to_split_vertex_map[vertex_index])
+                                            
+                                            split_exporter_polygons.append([poly_indices[0], poly_indices[1], poly_indices[2]])
+
+                                        __add_object_data(
+                                            object_amount, 
+                                            split_object_name, 
+                                            object_parent_name, 
+                                            object_world_matrix, 
+                                            object_local_matrix, 
+                                            split_exporter_vertices, 
+                                            split_exporter_normals, 
+                                            split_exporter_uvs, 
+                                            split_exporter_polygons, 
+                                            split_exporter_weights, 
+                                            group_unique_bones_list, 
+                                            current_texture_path, 
+                                            ""
+                                        )
                             
                             
                         
