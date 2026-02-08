@@ -1,6 +1,6 @@
 # cbb-rf-online-addon
 
-An addon for Blender 4.3.0 (also tested with 4.4.3) to import and export the .msh, .bn (.bbx goes together) and .ani files for RF Online. The entity (R3E) and map (BSP) formats are import only. Import operations also work with drag and drop.
+An addon for Blender 5.0.0 to import and export the .msh, .bn (.bbx goes together) and .ani files for RF Online. The entity (R3E) and map (BSP) formats are import only. Import operations also work with drag and drop.
 
 There is code for exporting the BSP format inside the addon code but it is deactivated due to being incomplete. It only reaches so far as actually exporting walkable map geometry (with the BSP structure also built) and baking+exporting the light maps. Unfortunately, Blender proved to not be very suitable for the task of actually being a complete map editor for RF Online, mostly due to complexity issues with the .SPT particle format and other desirable features that would be hard to implement into it, such as mob spawn areas and portals. The R3M materials are also quite hard to simulate, since the original engine rendered the same mesh multiple times for each texture layer they had.
 It is possible to reactivate the feature by manually uncommenting the three commented lines in the bsp.py's menu_func_export, register and unregister functions. Expect no support for this feature, as the more proper solution would be writing a proper dedicated software.
@@ -33,7 +33,7 @@ In-depth details about features:
 
  -The "Ignore Not Found Objects" option shouldn't really be turned off, unless you're curious about what objects the animation is missing. Since most animations have some unused objects, the importer will probably fail most of the time.
 
- -If you've found an animation that has failed the automatic latch but you're sure the armature is compatible (e.g. bellato player animation for the bellato skeleton), simply select the armature and turn "Apply to Selected Objects" on when importing the animation.
+ -If you've found an animation that has failed the automatic latch but you're sure the armature and objects are compatible (e.g. bellato player animation for the bellato skeleton), simply select all the objects in the compatible collection and turn "Apply to Selected Objects" on when importing the animation.
 
 __.BSP importer__ :
 
@@ -61,6 +61,8 @@ __.MSH exporter__ :
 
  -The texture path that is exported along with each mesh file is the name of the first texture assigned to the BSDF Principled shader in any material.
 
+ -Objects can have multiple materials during the export phase. The addon will capture the first texture it finds that is connected to the Base Color node of the BSDF Principled shader node on the material.
+
 __.BN exporter__ :
 
  -Will export all armatures present in the scene by default. Turn on the "Export only selected" option if you wish to export only selected armatures.
@@ -69,6 +71,6 @@ __.BN exporter__ :
 
 __.ANI exporter__ :
 
- -"Action(s) to Export" option: In order, they are: Export only the currently active action (context sensitive, usually the last chosen action in Blender), export all animations that have something to do with the currently active collection, export all animations that have something to do with the objects in the current selection and the final option is to simply export all actions in the scene.
+ -Exports all actions present in the scene to the folder chosen during the file selector UI window.
 
  -The exported actions will have the exact same name they were given in Blender.
