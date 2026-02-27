@@ -53,6 +53,12 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
         description="Enabling this option make the importer preserve parent-child relationships across all objects, even object to bone relations. Turn this off if you wish to export the imported object to the .FBX format later. Keep it on if you pretend to use the imported object for anything else, such as reimporting it to RF again.",
         default=True
     ) # type: ignore
+
+    assign_bind_matrices_to_objects: BoolProperty(
+        name="Assign Bind Matrices to Objects",
+        description="Turn this on if you wish to export .ani and .msh files from the same Blender scene. Using this will assign a custom property storing the object's matrix at the time it was imported initially, making it the object's 'bind matrix'. To update this matrix, use the new operators in the object's right-click context menu.",
+        default=False
+    ) # type: ignore
     
     EXTRACTION_FOLDER = "cbb_extract"
     WEIGHT_TOLERANCE = 1e-05
@@ -706,7 +712,8 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                 obj = bpy.data.objects.new(object_name, mesh)
                                 
                                 obj.matrix_world = object_world_matrix
-                                obj["msh_bind_matrix"] = [v for row in object_world_matrix for v in row]
+                                if self.assign_bind_matrices_to_objects:
+                                    obj["msh_bind_matrix"] = [v for row in object_world_matrix for v in row]
                                 new_collection.objects.link(obj)
                                 created_objects.append(obj)
                                 

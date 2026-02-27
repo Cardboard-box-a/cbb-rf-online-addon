@@ -214,8 +214,12 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                         # is in quaternion rotation mode for keyframes to take effect
                         obj.rotation_mode = 'QUATERNION'
                         
-                        # Keyframe the object - these keyframes go into this object's slot
-                        # No data path pollution because each object has its own slot
+                        # The ANI format stores true local transforms (relative to parent, no Blender matrix_parent_inverse involved). 
+                        # To correctly drive matrix_basis such that Blender reconstructs the right local transform,
+                        # we must pre-multiply by matrix_parent_inverse.inverted().
+                        # This way: matrix_parent_inverse @ matrix_basis = true local transform.
+                        mpi_inv = obj.matrix_parent_inverse.inverted()
+                        
                         for count in range(rotation_keyframe_counts[index]):
                             animated_rotation, scaled_frame = rotation_frames[index][count]
                             frame = scaled_frame / FRAME_SCALE
@@ -223,8 +227,10 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                             if highest_frame < frame:
                                 highest_frame = frame
 
-                            rot = animated_rotation.conjugated()
-                            obj.rotation_quaternion = rot
+                            true_local_rot = animated_rotation.conjugated()
+                            # Convert to matrix to apply mpi_inv, then decompose back
+                            corrected = (mpi_inv @ true_local_rot.to_matrix().to_4x4()).to_quaternion()
+                            obj.rotation_quaternion = corrected
                             obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 
                         for count in range(position_keyframe_counts[index]):
@@ -234,7 +240,8 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
                             if highest_frame < frame:
                                 highest_frame = frame
 
-                            obj.location = animated_position
+                            corrected_pos = mpi_inv @ animated_position
+                            obj.location = corrected_pos
                             obj.keyframe_insert(data_path="location", frame=frame)
                         
                         for count in range(scale_keyframe_counts[index]):
@@ -554,7 +561,15 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                     
                     # Read matrix_basis - this is the object's local transform (independent of parent)
                     # This is what the animator keyframes and what the ANI format expects
-                    local_matrix = object_eval.matrix_basis
+                    if object.parent:
+                        if object.parent_type == "BONE" and object.parent_bone:
+                            parent_bone = object.parent.evaluated_get(depsgraph).pose.bones[object.parent_bone]
+                            parent_world = object.parent.evaluated_get(depsgraph).matrix_world @ parent_bone.matrix
+                        else:
+                            parent_world = object.parent.evaluated_get(depsgraph).matrix_world
+                        local_matrix = parent_world.inverted() @ object_eval.matrix_world
+                    else:
+                        local_matrix = object_eval.matrix_world
                     
                     obj_animated_rotation = local_matrix.to_quaternion()
                     obj_animated_position = local_matrix.to_translation()
@@ -564,7 +579,8 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                     temp_rotation_keyframes.append(Quaternion((-obj_animated_rotation.w, obj_animated_rotation.x, obj_animated_rotation.y, obj_animated_rotation.z)))
                     temp_position_keyframes.append(obj_animated_position)
                     temp_scale_keyframes.append(obj_animated_scale)
-                    
+                
+
                 if object.type == "MESH":
                     mesh: bpy.types.Mesh = object.data
                     mesh_polygons = mesh.polygons
@@ -663,7 +679,7 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
                         
                         obj_animated_scale = pose_bone_eval.scale.copy()
                         temp_scale_keyframes.append(obj_animated_scale)
-                        
+
                     export_rotation_keyframes[index] = temp_rotation_keyframes
                     export_position_keyframes[index] = temp_position_keyframes
                     export_scale_keyframes[index] = temp_scale_keyframes
