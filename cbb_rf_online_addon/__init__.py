@@ -14,6 +14,7 @@ from . import bn_skeleton
 from . import msh
 from . import ani
 from . import r3e
+from . import batch_glb_exporter
 from . import texture_utils
 texture_utils.check_imagemagick()
 
@@ -39,6 +40,7 @@ def register():
     msh.register()
     ani.register()
     r3e.register()
+    batch_glb_exporter.register()
     rf_shared.register()
     bpy.utils.register_class(SHADER_PROPERTIES_PANEL_PT_custom_props)
 
@@ -49,6 +51,7 @@ def unregister():
     msh.unregister()
     ani.unregister()
     r3e.unregister()
+    batch_glb_exporter.unregister()
     rf_shared.unregister()
     bpy.utils.unregister_class(SHADER_PROPERTIES_PANEL_PT_custom_props)
 

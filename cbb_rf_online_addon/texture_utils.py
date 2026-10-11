@@ -197,31 +197,67 @@ def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
         unique, counts = np.unique(alpha, return_counts=True)
         histogram = dict(zip(unique.tolist(), counts.tolist()))
         
-        binary_pixels = histogram.get(0, 0) + histogram.get(255, 0)
         total_pixels = width * height
+        min_alpha = int(unique.min())
+        max_alpha = int(unique.max())
+        transparent_threshold = 33
+        opaque_threshold = 224
+        transparent_noise_percentage = 2.0
+        blend_mid_alpha_percentage = 25.0
+
+        near_transparent_pixels = int((alpha < transparent_threshold).sum())
+        near_opaque_pixels = int((alpha >= opaque_threshold).sum())
+        mid_alpha_pixels = int(((alpha >= transparent_threshold) & (alpha < opaque_threshold)).sum())
+        binary_pixels = near_transparent_pixels + near_opaque_pixels
         binary_percentage = (binary_pixels / total_pixels) * 100
+        transparent_percentage = (near_transparent_pixels / total_pixels) * 100
+        opaque_percentage = (near_opaque_pixels / total_pixels) * 100
+        mid_alpha_percentage = (mid_alpha_pixels / total_pixels) * 100
         
         print(f"  Alpha values found: {sorted(histogram.keys())[:20]}...")
+        print(f"  Alpha range: {min_alpha}..{max_alpha}, near-transparent pixels: {transparent_percentage:.1f}%, mid-alpha pixels: {mid_alpha_percentage:.1f}%")
         print(f"  Binary percentage: {binary_percentage:.1f}%")
         
         # Check if ALL pixels are fully opaque
-        if histogram.get(255, 0) == total_pixels:
+        if min_alpha >= transparent_threshold:
             return {
                 'has_alpha': False,
                 'mode': 'OPAQUE',
                 'threshold': None,
                 'histogram': histogram,
-                'binary_percentage': 100.0
+                'binary_percentage': binary_percentage,
+                'transparent_percentage': transparent_percentage,
+                'opaque_percentage': opaque_percentage,
+                'min_alpha': min_alpha,
+                'max_alpha': max_alpha
+            }
+
+        if transparent_percentage < transparent_noise_percentage:
+            return {
+                'has_alpha': False,
+                'mode': 'OPAQUE',
+                'threshold': None,
+                'histogram': histogram,
+                'binary_percentage': binary_percentage,
+                'transparent_percentage': transparent_percentage,
+                'opaque_percentage': opaque_percentage,
+                'min_alpha': min_alpha,
+                'max_alpha': max_alpha
             }
         
         # Determine mode based on binary percentage
         if binary_percentage > 98:
             mode = 'MASK'
-            non_binary = [v for v in histogram.keys() if 0 < v < 255]
-            threshold = min(non_binary) / 255.0 if non_binary else 0.5
+            threshold = transparent_threshold / 255.0
         elif binary_percentage > 90:
             mode = 'MASK'
-            threshold = 0.1
+            threshold = transparent_threshold / 255.0
+        elif transparent_percentage <= 20 and opaque_percentage >= 70:
+            mode = 'MASK'
+            threshold = transparent_threshold / 255.0
+        elif mid_alpha_percentage < blend_mid_alpha_percentage:
+            mode = 'MASK'
+            threshold = transparent_threshold / 255.0
         else:
             mode = 'BLEND'
             threshold = None
@@ -231,18 +267,23 @@ def analyze_dds_alpha(dds_path: str) -> Dict[str, any]:
             'mode': mode,
             'threshold': threshold,
             'histogram': histogram,
-            'binary_percentage': binary_percentage
+            'binary_percentage': binary_percentage,
+            'transparent_percentage': transparent_percentage,
+            'opaque_percentage': opaque_percentage,
+            'min_alpha': min_alpha,
+            'max_alpha': max_alpha
         }
         
     except Exception as e:
         print(f"Error analyzing DDS alpha: {e}")
         import traceback
         traceback.print_exc()
-        # Conservative fallback
+        # Fallback to opaque. Accidental BLEND is more damaging for glTF export than
+        # missing transparency, and most RF textures are not true translucent surfaces.
         return {
-            'has_alpha': True,
-            'mode': 'BLEND',
-            'threshold': 0.5,
+            'has_alpha': False,
+            'mode': 'OPAQUE',
+            'threshold': None,
             'histogram': {},
             'binary_percentage': 0.0
         }

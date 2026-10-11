@@ -467,7 +467,7 @@ class ImportBSP(Operator, ImportHelper):
                                                                             
                                         face_vertices.reverse()
                                         faces_indices.append(face_vertices)
-                                       
+                                        
 
                                 mesh.from_pydata(vertices, [], faces_indices)
                                

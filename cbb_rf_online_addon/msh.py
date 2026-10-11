@@ -146,11 +146,11 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                 except:
                     pass
             
-            # Can't analyze, use conservative default
+            # Can't analyze. Prefer opaque because BLEND causes sorting artifacts in glTF viewers.
             return existing_image, {
-                'has_alpha': True,
-                'mode': 'BLEND',
-                'threshold': 0.5,
+                'has_alpha': False,
+                'mode': 'OPAQUE',
+                'threshold': None,
                 'histogram': {},
                 'binary_percentage': 0.0
             }
@@ -198,7 +198,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                 alpha_analysis = texture_utils.analyze_dds_alpha(full_texture_path)
                             except Exception as e:
                                 print(f"    Warning: Alpha analysis failed: {e}")
-                                alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                                alpha_analysis = {'mode': 'OPAQUE', 'threshold': None, 'has_alpha': False}
 
                             # Now load the texture
                             try:
@@ -251,7 +251,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                     alpha_analysis = texture_utils.analyze_dds_alpha(temp_file.name)
                                 except Exception as e:
                                     print(f"    Warning: Alpha analysis failed: {e}")
-                                    alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                                    alpha_analysis = {'mode': 'OPAQUE', 'threshold': None, 'has_alpha': False}
                                 
                                 # Load into Blender
                                 blender_image = bpy.data.images.load(temp_file.name)
@@ -304,7 +304,7 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                             alpha_analysis = texture_utils.analyze_dds_alpha(full_texture_path)
                         except Exception as e:
                             print(f"    Warning: Alpha analysis failed: {e}")
-                            alpha_analysis = {'mode': 'BLEND', 'threshold': 0.5, 'has_alpha': False}
+                            alpha_analysis = {'mode': 'OPAQUE', 'threshold': None, 'has_alpha': False}
                     else:
                         alpha_analysis = {'mode': 'OPAQUE', 'threshold': 0.5, 'has_alpha': False}
 
@@ -670,7 +670,12 @@ class CBB_OT_ImportMSH(Operator, ImportHelper):
                                     else:
                                         for _ in range(weight_amount):
                                             vertex_index, amount_of_weights = struct.unpack("<II", opened_file.read(8))
-                                            bone_names = [reader.read_fixed_string(100, "euc-kr") for _ in range(4)]
+                                            bone_names = []
+                                            for bone_slot in range(4):
+                                                if bone_slot < amount_of_weights:
+                                                    bone_names.append(reader.read_fixed_string(100, "euc-kr"))
+                                                else:
+                                                    opened_file.seek(100, 1)
                                             read_weights = reader.read_values("4f", 16)
                                             base_vertices_weights[vertex_index] = (bone_names, read_weights)
                                         

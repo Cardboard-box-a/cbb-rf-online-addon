@@ -16,6 +16,58 @@ import os
 
 FRAME_SCALE = 160
 
+
+def collect_action_targets(action: Action, msg_handler: Utils.MessageHandler | None = None) -> list[tuple[bpy.types.Object, bpy.types.ActionSlot]]:
+    """
+    Return the (object, slot) pairs that `action` currently animates.
+
+    Object identity comes from each slot's own users (and, as a fallback, from
+    NLA strips). The slot's *name* is deliberately never used to look objects up:
+    a slot's display name is not guaranteed to match the object it animates (for
+    example, a slot created from the slot selector while an armature is selected
+    is default-named "Slot"), and matching by name silently drops otherwise valid
+    actions such as skeletal/armature animations.
+    """
+    def _log(message: str) -> None:
+        if msg_handler is not None:
+            msg_handler.debug_print(message)
+
+    targets: list[tuple[bpy.types.Object, bpy.types.ActionSlot]] = []
+    seen_objects: set[bpy.types.Object] = set()
+
+    # Primary method: ask each slot which data-blocks it animates.
+    if hasattr(action, "slots") and action.slots:
+        _log(f"    Action has {len(action.slots)} slot(s)")
+        for slot in action.slots:
+            _log(f"      Slot identifier: '{slot.identifier}' (name: '{slot.name_display}')")
+            for user in slot.users():
+                if isinstance(user, bpy.types.Object) and user not in seen_objects:
+                    targets.append((user, slot))
+                    seen_objects.add(user)
+                    _log(f"        → Slot user: '{user.name}' ({user.type})")
+
+    # Fallback: the action may be stashed in an NLA track instead of being the
+    # active action, in which case the slot users above will not find it.
+    for obj in bpy.data.objects:
+        if obj in seen_objects:
+            continue
+        animation_data = obj.animation_data
+        if not (animation_data and animation_data.nla_tracks):
+            continue
+        for track in animation_data.nla_tracks:
+            for strip in track.strips:
+                if strip.action is action:
+                    targets.append((obj, strip.action_slot))
+                    seen_objects.add(obj)
+                    _log(f"      NLA fallback → Added object: '{obj.name}' ({obj.type}) via NLA track")
+                    break
+            else:
+                continue
+            break
+
+    return targets
+
+
 class CBB_OT_ImportAni(Operator, ImportHelper):
     bl_idname = "cbb.ani_import"
     bl_label = "Import ani"
@@ -376,56 +428,16 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
             total_actions_scanned += 1
             msg_handler.debug_print(f"  Processing action: '{action.name}' (users: {action.users})")
             
-            linked_objects = []
-            
-            # Primary method: Action slots
-            if hasattr(action, "slots") and action.slots:
-                msg_handler.debug_print(f"    Action has {len(action.slots)} slot(s)")
-                
-                for slot in action.slots:
-                    identifier = slot.identifier
-                    
-                    # Strip Blender's internal ID type prefix (OB = Object, AR = Armature, etc.)
-                    # The slot identifier uses format like "OBObjectName" but obj.name is just "ObjectName"
-                    if identifier.startswith("OB"):
-                        identifier = identifier[2:]
-                    
-                    msg_handler.debug_print(f"      Slot identifier: '{slot.identifier}' → object name: '{identifier}'")
-                    
-                    # Try to find matching object
-                    found = False
-                    for obj in bpy.data.objects:
-                        if obj.name == identifier and obj not in linked_objects:
-                            linked_objects.append(obj)
-                            msg_handler.debug_print(f"        → Found object: '{obj.name}' ({obj.type})")
-                            found = True
-                            break
-                    
-                    if not found:
-                        msg_handler.debug_print(f"      No object found for slot identifier: '{identifier}'")
-            
-            # Fallback: Check NLA tracks for stashed/pushed actions
-            nla_found_count = 0
-            for obj in bpy.data.objects:
-                if not (obj.animation_data and obj.animation_data.nla_tracks):
-                    continue
-                    
-                nla_actions = Utils.get_actions_from_nla_tracks(obj)
-                if action in nla_actions and obj not in linked_objects:
-                    linked_objects.append(obj)
-                    msg_handler.debug_print(f"      NLA fallback → Added object: '{obj.name}' ({obj.type}) from NLA track")
-                    nla_found_count += 1
-            
-            if nla_found_count > 0:
-                msg_handler.debug_print(f"    NLA fallback added {nla_found_count} object(s)")
-            
+            linked_objects = collect_action_targets(action, msg_handler)
+
             # Final decision for this action
             if linked_objects:
                 actions_to_export[action] = linked_objects
                 actions_with_objects += 1
                 msg_handler.debug_print(f"  Action '{action.name}' will be exported — linked to {len(linked_objects)} object(s):")
-                for obj in linked_objects:
-                    msg_handler.debug_print(f"     • {obj.name} ({obj.type})")
+                for obj, slot in linked_objects:
+                    slot_identifier = slot.identifier if slot else None
+                    msg_handler.debug_print(f"     • {obj.name} ({obj.type}) via slot '{slot_identifier}'")
             else:
                 msg_handler.debug_print(f"  Action '{action.name}' has NO linked objects → skipped")
         
@@ -438,16 +450,16 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         
         # Actually export each collected action
         exported_count = 0
-        for action, objects in actions_to_export.items():
-            msg_handler.debug_print(f"Exporting action: '{action.name}' ({len(objects)} objects)")
-            self.export_action(action, objects, directory, msg_handler)
+        for action, targets in actions_to_export.items():
+            msg_handler.debug_print(f"Exporting action: '{action.name}' ({len(targets)} objects)")
+            self.export_action(action, targets, directory, msg_handler)
             exported_count += 1
         
         msg_handler.debug_print(f"Export finished — processed {exported_count} action(s)")
         
         return {"FINISHED"}
         
-    def export_action(self, action: Action, action_objects: list[bpy.types.Object], directory: str, msg_handler: Utils.MessageHandler):
+    def export_action(self, action: Action, action_targets: list[tuple[bpy.types.Object, bpy.types.ActionSlot]], directory: str, msg_handler: Utils.MessageHandler):
         print(f"Exporting action {action.name}")
         
         # Save current state to restore later
@@ -456,12 +468,15 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         old_active_mode = old_active_object.mode if old_active_object else 'OBJECT'
         old_selection = [obj for obj in bpy.context.selected_objects]
         old_frame = bpy.context.scene.frame_current
-        old_actions = {}
+        old_state = {}
         
-        # Save all objects' current actions
-        for obj in action_objects:
-            if obj.animation_data:
-                old_actions[obj] = obj.animation_data.action
+        # Save each object's current action and slot so we can restore them afterwards
+        for obj, _slot in action_targets:
+            animation_data = obj.animation_data
+            old_state[obj] = (
+                animation_data.action if animation_data else None,
+                animation_data.action_slot if animation_data else None,
+            )
         
         # Switch to object mode for evaluation
         if old_active_object:
@@ -472,11 +487,15 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         # This preserves Action Slots and properly evaluates constraints/drivers
         # Baking the actions to NLA data was not working very well with the new slots implementation.
         
-        for obj in action_objects:
+        for obj, slot in action_targets:
             # Ensure the object has the action assigned
             if obj.animation_data is None:
                 obj.animation_data_create()
+            # Assign the action AND this object's own slot explicitly. Re-assigning
+            # the action alone re-runs Blender's auto-slot heuristics, which may not
+            # pick the slot this object was actually animated by.
             obj.animation_data.action = action
+            obj.animation_data.action_slot = slot
         
         filepath = bpy.path.ensure_ext(directory + "/" + action.name, self.filename_ext)
         
@@ -504,9 +523,9 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         
         msg_handler.debug_print(f"Animation [{action.name}] frame range: {int(action.frame_range[0])} - {int(action.frame_range[1])}")
         
-        # ACTION SLOTS: Each object in action_objects has its own slot within the same action
-        # We can iterate through them and export each slot's data
-        for object in action_objects:
+        # ACTION SLOTS: each (object, slot) pair is exported using the object's own
+        # selected slot, so that several objects can share one action.
+        for object, _slot in action_targets:
             
             if object.type in {"MESH", "EMPTY"}:
                 def add_object_animation_data(_object_name, _total_frames, _total_export_frames, _export_rotation_keyframes, _export_position_keyframes, _export_scale_keyframes):
@@ -726,10 +745,12 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         # Restore previous state
         bpy.context.scene.frame_set(old_frame)
         
-        # Restore old actions
-        for obj, old_action in old_actions.items():
+        # Restore old actions and slots
+        for obj, (old_action, old_slot) in old_state.items():
             if obj.animation_data:
                 obj.animation_data.action = old_action
+                if old_action is not None:
+                    obj.animation_data.action_slot = old_slot
         
         # Restore selection and mode
         bpy.ops.object.select_all(action='DESELECT')
