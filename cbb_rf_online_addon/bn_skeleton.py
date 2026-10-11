@@ -133,6 +133,13 @@ class CBB_OT_ImportBNSkeleton(Operator, ImportHelper):
                     bpy.ops.object.mode_set(mode="POSE")
                     
                     for bone_index, bone_name in enumerate(skeleton_data.bone_names):
+                        # Bones exported without a custom shape carry no vertex data. Skip creating a
+                        # bone shape object for them, otherwise the importer would assign an empty
+                        # mesh as the bone's custom shape, making it invisible in Pose mode.
+                        if len(skeleton_data.bone_vertices[bone_index]) == 0:
+                            msg_handler.debug_print(f"Skipping bone shape object for [{bone_name}]: no vertex data.")
+                            continue
+                        
                         mesh_name = f"{bone_name}_Mesh"
                         mesh_data = bpy.data.meshes.new(name=mesh_name)
                         mesh_obj = bpy.data.objects.new(name=mesh_name, object_data=mesh_data)
@@ -365,7 +372,9 @@ class SkeletonData:
                     self.bone_hit_boxes_max.append(reader.read_converted_vector3f())
                     self.bone_hit_boxes_min.append(reader.read_converted_vector3f())
                     
-                    f.seek(67, 1)
+                    unknown_flags = reader.read_values("16I", 64)
+                    has_face_terminator_indices = unknown_flags[4] != 0
+                    f.seek(3, 1)
                     
                     boneVertices = []
                     boneNormals = []
@@ -379,7 +388,7 @@ class SkeletonData:
                         boneNormals.append(reader.read_vector3f())
                     
                     boneFaces = []
-                    firstFaceIndex = reader.read_uint()
+                    firstFaceIndex = reader.read_uint() if shape_faces_amount > 0 or has_face_terminator_indices else 0
                     
                     for i in range(shape_faces_amount):
                         
@@ -389,7 +398,8 @@ class SkeletonData:
                         
                         f.seek(76, 1)
                         
-                        firstFaceIndex = reader.read_uint()
+                        if has_face_terminator_indices or i != shape_faces_amount - 1:
+                            firstFaceIndex = reader.read_uint()
                         
                     self.bone_vertices.append(boneVertices)
                     self.bone_faces.append(boneFaces)
