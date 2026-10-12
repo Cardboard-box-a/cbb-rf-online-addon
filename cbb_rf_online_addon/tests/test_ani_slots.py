@@ -259,3 +259,34 @@ def test_export_operator_writes_mesh_animation(fresh_scene, tmp_path):
     assert result == {"FINISHED"}
     assert out.exists()
     assert "Cube" in _parse_ani_object_names(out)
+
+
+# --------------------------------------------------------------------------- #
+# Filename sanitization (illegal characters in Action names)
+# --------------------------------------------------------------------------- #
+
+def test_sanitize_filename_replaces_illegal_characters():
+    assert ani.sanitize_filename("Rig|Idle") == "Rig_Idle"
+    assert ani.sanitize_filename("Armature|clip|Base Layer") == "Armature_clip_Base Layer"
+    assert ani.sanitize_filename('a:b*c?d"e<f>g\\h/i') == "a_b_c_d_e_f_g_h_i"
+    assert ani.sanitize_filename("trailing. ") == "trailing"
+    assert ani.sanitize_filename("") == "animation"
+
+
+def test_export_operator_handles_action_name_with_illegal_chars(fresh_scene, tmp_path):
+    """FBX-imported action names contain '|' (e.g. "Rig|Idle"); export must not
+    crash with OSError [Errno 22] and must write a sanitized file name."""
+    arm = _make_armature("Rig")
+    action = bpy.data.actions.new("Rig|pl_bepo_orig02_skill_a_end|Base Layer")
+    slot = action.slots.new(id_type="OBJECT", name="Slot")
+    adt = arm.animation_data_create()
+    adt.action = action
+    adt.action_slot = slot
+    _key_bone(arm)
+
+    result = bpy.ops.cbb.ani_export("EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"))
+
+    assert result == {"FINISHED"}
+    expected = tmp_path / "Rig_pl_bepo_orig02_skill_a_end_Base Layer.ANI"
+    assert expected.exists()
+    assert "Root" in _parse_ani_object_names(expected)

@@ -13,6 +13,7 @@ from mathutils import Vector, Quaternion, Matrix
 from .bn_skeleton import SkeletonData
 from pathlib import Path
 import os
+import re
 
 FRAME_SCALE = 160
 
@@ -66,6 +67,23 @@ def collect_action_targets(action: Action, msg_handler: Utils.MessageHandler | N
             break
 
     return targets
+
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_filename(name: str) -> str:
+    """Return `name` made safe to use as a single file name on all platforms.
+
+    Blender allows characters in data-block names that are illegal in file
+    names (for example '|' from FBX-imported Action names such as "Rig|Idle"),
+    which makes ``open()`` fail with ``OSError [Errno 22]`` on Windows. Any such
+    character is replaced with '_'.
+    """
+    sanitized = _INVALID_FILENAME_CHARS.sub("_", name)
+    # Windows also disallows trailing spaces and dots.
+    sanitized = sanitized.strip().rstrip(". ")
+    return sanitized or "animation"
 
 
 class CBB_OT_ImportAni(Operator, ImportHelper):
@@ -497,7 +515,7 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
             obj.animation_data.action = action
             obj.animation_data.action_slot = slot
         
-        filepath = bpy.path.ensure_ext(directory + "/" + action.name, self.filename_ext)
+        filepath = bpy.path.ensure_ext(directory + "/" + sanitize_filename(action.name), self.filename_ext)
         
         initial_frame = action.frame_range[0]
         last_frame = action.frame_range[1]
