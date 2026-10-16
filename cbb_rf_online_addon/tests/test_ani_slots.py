@@ -290,3 +290,163 @@ def test_export_operator_handles_action_name_with_illegal_chars(fresh_scene, tmp
     expected = tmp_path / "Rig_pl_bepo_orig02_skill_a_end_Base Layer.ANI"
     assert expected.exists()
     assert "Root" in _parse_ani_object_names(expected)
+
+
+# --------------------------------------------------------------------------- #
+# Every clip of a rig is exported, not just the active one
+# --------------------------------------------------------------------------- #
+
+def _make_clip(arm_obj, action_name, slot_name):
+    """Create a one-slot action, assign it to the armature, and key the bone."""
+    action = bpy.data.actions.new(action_name)
+    slot = action.slots.new(id_type="OBJECT", name=slot_name)
+    adt = arm_obj.animation_data or arm_obj.animation_data_create()
+    adt.action = action
+    adt.action_slot = slot
+    _key_bone(arm_obj)
+    return action
+
+
+def _make_object_action(obj, action_name, slot_name):
+    """Create a one-slot action for a plain object and key its location."""
+    action = bpy.data.actions.new(action_name)
+    slot = action.slots.new(id_type="OBJECT", name=slot_name)
+    adt = obj.animation_data or obj.animation_data_create()
+    adt.action = action
+    adt.action_slot = slot
+    obj.location = (1.0, 0.0, 0.0)
+    obj.keyframe_insert("location", frame=1)
+    return action
+
+
+def test_collect_finds_inactive_action_by_slot_name(fresh_scene):
+    """Two clips on one rig; only one is active, but both must be collectable."""
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+    active = _make_clip(arm, "STAND", "WING")   # reassigning makes this the active one
+
+    idle = bpy.data.actions["IDLE"]
+    assert idle.users == 0
+    assert active.users == 1
+
+    targets = ani.collect_action_targets(idle)
+    assert [(obj.name, slot.identifier) for obj, slot in targets] == [("WING", "OBWING")]
+
+
+def test_collect_does_not_name_match_an_assigned_slot(fresh_scene):
+    """A slot assigned to one object must not also be name-matched to another."""
+    _make_cube("Cube")                     # decoy whose name equals the slot name
+    sphere = _make_cube("Sphere")
+    action = bpy.data.actions.new("Clip")
+    slot = action.slots.new(id_type="OBJECT", name="Cube")
+    adt = sphere.animation_data_create()
+    adt.action = action
+    adt.action_slot = slot
+    sphere.keyframe_insert("location", frame=1)
+
+    targets = ani.collect_action_targets(action)
+    assert [obj.name for obj, _slot in targets] == ["Sphere"]
+
+
+def test_collect_recovers_unassigned_object_of_shared_action(fresh_scene):
+    """One action, two slots; one object assigned, the other only name-matched."""
+    cube = _make_cube("Cube")
+    _make_cube("Sphere")
+    action = bpy.data.actions.new("Shared")
+    cube_slot = action.slots.new(id_type="OBJECT", name="Cube")
+    action.slots.new(id_type="OBJECT", name="Sphere")   # never assigned
+
+    cube.animation_data_create()
+    cube.animation_data.action = action
+    cube.animation_data.action_slot = cube_slot
+    cube.keyframe_insert("location", frame=1)
+
+    got = {obj.name: slot.identifier for obj, slot in ani.collect_action_targets(action)}
+    assert got == {"Cube": "OBCube", "Sphere": "OBSphere"}
+
+
+def test_export_operator_writes_every_clip_of_one_rig(fresh_scene, tmp_path):
+    """Regression: exporting must not stop at the single active action."""
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+    _make_clip(arm, "STAND", "WING")
+
+    result = bpy.ops.cbb.ani_export("EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"))
+
+    assert result == {"FINISHED"}
+    assert (tmp_path / "IDLE.ANI").exists()
+    assert (tmp_path / "STAND.ANI").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Export scope option
+# --------------------------------------------------------------------------- #
+
+def test_export_scope_all_actions_is_default(fresh_scene, tmp_path):
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+    _make_clip(arm, "STAND", "WING")
+
+    bpy.ops.cbb.ani_export("EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"))
+
+    assert (tmp_path / "IDLE.ANI").exists()
+    assert (tmp_path / "STAND.ANI").exists()
+
+
+def test_export_scope_active_action(fresh_scene, tmp_path):
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+    _make_clip(arm, "STAND", "WING")     # active
+    bpy.context.view_layer.objects.active = arm
+
+    result = bpy.ops.cbb.ani_export(
+        "EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"),
+        action_export_option="ACTIVE_ACTION",
+    )
+
+    assert result == {"FINISHED"}
+    assert (tmp_path / "STAND.ANI").exists()
+    assert not (tmp_path / "IDLE.ANI").exists()
+
+
+def test_export_scope_selected_objects(fresh_scene, tmp_path):
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+
+    cube = _make_cube("Cube")
+    _make_object_action(cube, "CubeAnim", "Cube")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    cube.select_set(True)
+    bpy.context.view_layer.objects.active = cube
+
+    bpy.ops.cbb.ani_export(
+        "EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"),
+        action_export_option="SELECTED_OBJECT_ACTIONS",
+    )
+
+    assert (tmp_path / "CubeAnim.ANI").exists()
+    assert not (tmp_path / "IDLE.ANI").exists()
+
+
+def test_export_scope_active_collection(fresh_scene, tmp_path):
+    arm = _make_armature("WING")
+    _make_clip(arm, "IDLE", "WING")
+
+    cube = _make_cube("Cube")
+    _make_object_action(cube, "CubeAnim", "Cube")
+
+    # Move the cube out of the active (scene) collection.
+    bpy.context.scene.collection.objects.unlink(cube)
+    other = bpy.data.collections.new("Other")
+    bpy.context.scene.collection.children.link(other)
+    other.objects.link(cube)
+    bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
+
+    bpy.ops.cbb.ani_export(
+        "EXEC_DEFAULT", filepath=str(tmp_path / "out.ANI"),
+        action_export_option="ACTIVE_COLLECTION_ACTIONS",
+    )
+
+    assert (tmp_path / "IDLE.ANI").exists()
+    assert not (tmp_path / "CubeAnim.ANI").exists()

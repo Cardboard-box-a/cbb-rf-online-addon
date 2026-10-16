@@ -18,17 +18,28 @@ import re
 FRAME_SCALE = 160
 
 
-def collect_action_targets(action: Action, msg_handler: Utils.MessageHandler | None = None) -> list[tuple[bpy.types.Object, bpy.types.ActionSlot]]:
+def collect_action_targets(action: Action, candidate_objects: list[bpy.types.Object] | None = None, msg_handler: Utils.MessageHandler | None = None) -> list[tuple[bpy.types.Object, bpy.types.ActionSlot]]:
     """
-    Return the (object, slot) pairs that `action` currently animates.
+    Return the (object, slot) pairs that `action` animates.
 
-    Object identity comes from each slot's own users (and, as a fallback, from
-    NLA strips). The slot's *name* is deliberately never used to look objects up:
-    a slot's display name is not guaranteed to match the object it animates (for
-    example, a slot created from the slot selector while an armature is selected
-    is default-named "Slot"), and matching by name silently drops otherwise valid
-    actions such as skeletal/armature animations.
+    Each slot is resolved to the object it animates, in order of reliability:
+
+    * If the slot is assigned (it has users), those objects are used together
+      with that very slot. This is the slot Blender is actually evaluating, and
+      it is the only signal available for slots whose name does not follow an
+      object's name (for example a slot default-named "Slot" on an armature).
+    * Otherwise the slot is associated by name (``slot.name_display``), which is
+      the same rule Blender itself uses to pick a slot for an object. This is
+      what keeps actions that are not currently assigned to anything exportable:
+      a slot named after the object is still exported.
+    * As a last resort the action is looked up in each object's NLA tracks.
     """
+    if candidate_objects is None:
+        candidates = list(bpy.data.objects)
+    else:
+        candidates = [obj for obj in candidate_objects if obj is not None]
+    candidate_set = set(candidates)
+
     def _log(message: str) -> None:
         if msg_handler is not None:
             msg_handler.debug_print(message)
@@ -36,20 +47,34 @@ def collect_action_targets(action: Action, msg_handler: Utils.MessageHandler | N
     targets: list[tuple[bpy.types.Object, bpy.types.ActionSlot]] = []
     seen_objects: set[bpy.types.Object] = set()
 
-    # Primary method: ask each slot which data-blocks it animates.
-    if hasattr(action, "slots") and action.slots:
-        _log(f"    Action has {len(action.slots)} slot(s)")
-        for slot in action.slots:
-            _log(f"      Slot identifier: '{slot.identifier}' (name: '{slot.name_display}')")
-            for user in slot.users():
-                if isinstance(user, bpy.types.Object) and user not in seen_objects:
+    slots = list(action.slots) if hasattr(action, "slots") else []
+    if slots:
+        _log(f"    Action has {len(slots)} slot(s)")
+
+    for slot in slots:
+        # 1) Assigned slot: its own users are the objects it animates.
+        assigned_users = [user for user in slot.users()
+                          if isinstance(user, bpy.types.Object) and user in candidate_set]
+        if assigned_users:
+            for user in assigned_users:
+                if user not in seen_objects:
                     targets.append((user, slot))
                     seen_objects.add(user)
-                    _log(f"        → Slot user: '{user.name}' ({user.type})")
+                    _log(f"      Slot '{slot.identifier}' → assigned object '{user.name}' ({user.type})")
+            continue
 
-    # Fallback: the action may be stashed in an NLA track instead of being the
+        # 2) Unassigned slot: associate by name, mirroring Blender's own rule.
+        if getattr(slot, "target_id_type", None) != "OBJECT":
+            continue
+        for obj in candidates:
+            if obj not in seen_objects and obj.name == slot.name_display:
+                targets.append((obj, slot))
+                seen_objects.add(obj)
+                _log(f"      Slot '{slot.identifier}' → name-matched object '{obj.name}' ({obj.type})")
+
+    # 3) Fallback: the action may be stashed in an NLA track instead of being the
     # active action, in which case the slot users above will not find it.
-    for obj in bpy.data.objects:
+    for obj in candidates:
         if obj in seen_objects:
             continue
         animation_data = obj.animation_data
@@ -414,13 +439,44 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
     filename_ext = ".ANI"
 
     filter_glob: StringProperty(default="*.ANI", options={"HIDDEN"}) # type: ignore
-    
+
+    action_export_option: bpy.props.EnumProperty(
+        name="Action(s) to Export",
+        description="Choose an option to define what action(s) will be exported",
+        items=[
+            ("ACTIVE_ACTION", "Active Action", "Export only the currently active action"),
+            ("ACTIVE_COLLECTION_ACTIONS", "Active Collection Actions", "Export all actions among objects in the currently active collection"),
+            ("SELECTED_OBJECT_ACTIONS", "Selected Objects Actions", "Export all actions among objects in the current selection"),
+            ("ALL_ACTIONS", "All Actions", "Export all scene actions"),
+        ],
+        default='ALL_ACTIONS'
+    ) # type: ignore
+
     debug: BoolProperty(
         name="Debug",
         description="Enabling this option will print debug data to console",
         default=False
     ) # type: ignore
-    
+
+    def collect_export_scope(self, context: Context):
+        """Return the (candidate objects, candidate actions) for the chosen option."""
+        if self.action_export_option == "ACTIVE_ACTION":
+            active_object = context.object
+            active_action = None
+            if active_object and active_object.animation_data:
+                active_action = active_object.animation_data.action
+            return list(bpy.data.objects), ([active_action] if active_action else [])
+
+        if self.action_export_option == "ACTIVE_COLLECTION_ACTIONS":
+            active_layer = context.view_layer.active_layer_collection
+            collection = active_layer.collection if active_layer else None
+            return (list(collection.objects) if collection else []), list(bpy.data.actions)
+
+        if self.action_export_option == "SELECTED_OBJECT_ACTIONS":
+            return list(context.selected_objects), list(bpy.data.actions)
+
+        return list(bpy.data.objects), list(bpy.data.actions)
+
     def execute(self, context):
     
         msg_handler = Utils.MessageHandler(self.debug, self.report)
@@ -433,20 +489,22 @@ class CBB_OT_ExportAni(Operator, ExportHelper):
         # Instead of exporting per-object actions, we export per-Action
         # Each Action represents one complete animation (like one .ANI file)
         
+        candidate_objects, candidate_actions = self.collect_export_scope(context)
+        
         actions_to_export = {}
         msg_handler.debug_print("Collecting actions with linked objects...")
         
         total_actions_scanned = 0
         actions_with_objects = 0
         
-        for action in bpy.data.actions:
+        for action in candidate_actions:
             if not action:
                 continue
                 
             total_actions_scanned += 1
             msg_handler.debug_print(f"  Processing action: '{action.name}' (users: {action.users})")
             
-            linked_objects = collect_action_targets(action, msg_handler)
+            linked_objects = collect_action_targets(action, candidate_objects, msg_handler)
 
             # Final decision for this action
             if linked_objects:

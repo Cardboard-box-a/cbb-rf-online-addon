@@ -37,6 +37,8 @@ def _reset_data() -> None:
         bpy.data.armatures.remove(armature)
     for mesh in list(bpy.data.meshes):
         bpy.data.meshes.remove(mesh)
+    for collection in list(bpy.data.collections):
+        bpy.data.collections.remove(collection)
 
 
 @pytest.fixture(scope="session", autouse=True)
