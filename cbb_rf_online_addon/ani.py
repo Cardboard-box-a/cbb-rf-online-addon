@@ -415,15 +415,19 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
         
         return {"FINISHED"}
 
+    def draw(self, context: Context):
+        layout = self.layout
+        layout.prop(self, "apply_to_selected_objects")
+        layout.prop(self, "ignore_not_found")
+        layout.prop(self, "debug")
+
     def invoke(self, context: Context, event: Event):
-        # When the operator is triggered by a file drop, Blender has already set
-        # ``filepath``/``directory``/``files``. Import those files directly - do
-        # not open the file selector, which would only import whatever single
-        # file the selector happens to point at.
-        if self.properties.is_property_set("filepath"):
-            return self.execute(context)
-        context.window_manager.fileselect_add(self)
-        return {"RUNNING_MODAL"}
+        # A file drop arrives with ``filepath``/``directory``/``files`` already set.
+        # In that case show the operator's options (as a confirmation dialog) so
+        # the dropped files are imported with the chosen settings, instead of
+        # opening the file selector, which would only import the single file it
+        # points at. Without a filepath (menu entry) the file selector is opened.
+        return self.invoke_popup(context)
 
 
 class CBB_FH_ImportAni(bpy.types.FileHandler):

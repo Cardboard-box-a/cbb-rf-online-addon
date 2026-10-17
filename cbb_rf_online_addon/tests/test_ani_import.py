@@ -11,6 +11,7 @@ import math
 import os
 
 import bpy
+from bpy_extras.io_utils import ImportHelper
 from mathutils import Quaternion
 
 from cbb_rf_online_addon import ani
@@ -129,9 +130,14 @@ class _FakeProperties:
 class _FakeWindowManager:
     def __init__(self):
         self.fileselect_add_calls = 0
+        self.props_dialog_calls = []
 
     def fileselect_add(self, operator):
         self.fileselect_add_calls += 1
+
+    def invoke_props_dialog(self, operator, confirm_text="", title="", translate=False):
+        self.props_dialog_calls.append({"title": title, "confirm_text": confirm_text})
+        return {"RUNNING_MODAL"}
 
 
 class _FakeContext:
@@ -140,25 +146,41 @@ class _FakeContext:
 
 
 class _FakeOperator:
-    def __init__(self, set_names):
+    bl_label = "Import ani"
+
+    def __init__(self, set_names, filepath="", files=()):
         self.properties = _FakeProperties(set_names)
+        self.filepath = filepath
+        self.files = list(files)
         self.execute_calls = 0
 
     def execute(self, context):
         self.execute_calls += 1
         return {"FINISHED"}
 
+    def invoke_popup(self, context, confirm_text=""):
+        # Delegate to Blender's real implementation so the test exercises the
+        # same code path the operator uses at runtime.
+        return ImportHelper.invoke_popup(self, context, confirm_text)
 
-def test_invoke_imports_dropped_files_without_opening_the_file_selector():
-    """On a drop Blender pre-fills ``filepath``: import straight away."""
+
+def test_invoke_shows_the_options_dialog_for_dropped_files():
+    """A drop must show the import options instead of importing blindly."""
     context = _FakeContext()
-    dropped = _FakeOperator({"filepath"})
+    dropped = _FakeOperator(
+        {"filepath"},
+        filepath="/tmp/ISIS_AMY_ATTACK_03_00.ANI",
+        files=["a", "b", "c", "d", "e"],
+    )
 
     result = ani.CBB_OT_ImportAni.invoke(dropped, context, None)
 
-    assert result == {"FINISHED"}
-    assert dropped.execute_calls == 1
-    assert context.window_manager.fileselect_add_calls == 0
+    assert result == {"RUNNING_MODAL"}
+    assert dropped.execute_calls == 0                        # waits for confirmation
+    assert context.window_manager.fileselect_add_calls == 0   # no file selector
+    assert context.window_manager.props_dialog_calls == [
+        {"title": "Import 5 files", "confirm_text": "Import ani"}
+    ]
 
 
 def test_invoke_opens_the_file_selector_when_no_filepath_is_set():
@@ -171,3 +193,4 @@ def test_invoke_opens_the_file_selector_when_no_filepath_is_set():
     assert result == {"RUNNING_MODAL"}
     assert manual.execute_calls == 0
     assert context.window_manager.fileselect_add_calls == 1
+    assert context.window_manager.props_dialog_calls == []
