@@ -416,6 +416,12 @@ class CBB_OT_ImportAni(Operator, ImportHelper):
         return {"FINISHED"}
 
     def invoke(self, context: Context, event: Event):
+        # When the operator is triggered by a file drop, Blender has already set
+        # ``filepath``/``directory``/``files``. Import those files directly - do
+        # not open the file selector, which would only import whatever single
+        # file the selector happens to point at.
+        if self.properties.is_property_set("filepath"):
+            return self.execute(context)
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
